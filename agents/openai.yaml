@@ -1,0 +1,6 @@
+interface:
+  display_name: "GD Image Gen"
+  short_description: "Generate and edit images through streaming API"
+  default_prompt: "Use $gd-image-gen to generate or edit an image through the configured streaming image API."
+policy:
+  allow_implicit_invocation: true

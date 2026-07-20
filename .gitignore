@@ -1,0 +1,30 @@
+# Local authentication and environment configuration
+.env
+.env.*
+!.env.example
+auth.json
+auth.js
+config.toml
+*.local.json
+
+# Private key material
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Generated images, request logs, and local work files
+generated_images/
+output/
+input/
+*.log
+*.jsonl
+
+# Python tooling
+__pycache__/
+*.py[cod]
+.venv/
+
+# OS files
+.DS_Store
+Thumbs.db
