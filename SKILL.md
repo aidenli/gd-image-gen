@@ -49,6 +49,7 @@ Generate one image:
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { "$HOME\.codex" }
 uv run "$codexHome\skills\gd-image-gen\scripts\stream_image.py" generate `
   --prompt "<prompt>" `
+  --size "<resolved-size>" `
   --quality medium
 ```
 
@@ -59,6 +60,7 @@ $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { "$HOME\.codex" }
 uv run "$codexHome\skills\gd-image-gen\scripts\stream_image.py" edit `
   --prompt "<edit instructions and invariants>" `
   --image "C:\absolute\input.png" `
+  --size "<resolved-size>" `
   --quality medium
 ```
 
@@ -66,11 +68,11 @@ Repeat `--image` for multiple inputs. Add `--mask` only when the user supplied a
 
 ## Size Selection
 
-- If the prompt contains an explicit pixel size such as `1920x1080`, `1920×1080`, `1920*1080`, `1920x1080 px`, or `1920x1080像素`, pass the normalized `WIDTHxHEIGHT` as API `size`.
-- If the prompt mentions an aspect ratio such as `16:9` but no pixel size, pass API `size=auto`.
-- If the prompt mentions neither pixels nor an aspect ratio, pass API `size=auto`.
-- If both pixels and an aspect ratio appear, use the pixel size.
-- Preserve the prompt. Do not append ratio instructions and do not expose a separate `--size` argument.
+- Analyze the requested output size before invoking the script. This is a semantic judgment made by the calling model, not text extraction performed by the script.
+- Pass the result as `--size`: use normalized `WIDTHxHEIGHT` only when the user has requested one exact final canvas size; otherwise pass `auto`.
+- When the prompt has multiple dimensions, distinguish the requested deliverable from examples, source assets, input images, and minimum/maximum constraints. If that distinction is uncertain, use `auto`.
+- For ratio-only requests, no size request, or conflicting dimensions, pass `--size auto` and preserve the prompt unchanged.
+- The script accepts only `auto` or ASCII `WIDTHxHEIGHT`; it does not inspect the prompt for dimensions.
 
 ## Authentication And Routing
 

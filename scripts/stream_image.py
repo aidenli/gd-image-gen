@@ -31,11 +31,7 @@ DEFAULT_QUALITY = "medium"
 DEFAULT_OUTPUT_FORMAT = "png"
 DEFAULT_TIMEOUT_SECONDS = 1800.0
 DEFAULT_PARTIAL_IMAGES = 1
-PIXEL_SIZE_PATTERN = re.compile(
-    r"(?<!\d)(?P<width>[1-9][0-9]{0,4})\s*[xX×*＊]\s*"
-    r"(?P<height>[1-9][0-9]{0,4})(?P<unit>\s*(?:px|pixels?|像素))?",
-    re.IGNORECASE,
-)
+API_SIZE_PATTERN = re.compile(r"(?:auto|[1-9][0-9]*x[1-9][0-9]*)\Z")
 FORMAT_EXTENSIONS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
 EXPECTED_COMPLETED_TYPES = {
     "generate": "image_generation.completed",
@@ -239,15 +235,11 @@ def sanitize_prefix(value: str) -> str:
     return normalized or "generated"
 
 
-def detect_api_size(prompt: str) -> str:
-    detected: list[str] = []
-    for match in PIXEL_SIZE_PATTERN.finditer(prompt):
-        width = int(match.group("width"))
-        height = int(match.group("height"))
-        has_pixel_unit = bool(match.group("unit"))
-        if has_pixel_unit or min(width, height) >= 64:
-            detected.append(f"{width}x{height}")
-    return detected[-1] if detected else DEFAULT_SIZE
+def parse_api_size(raw: str) -> str:
+    value = raw.strip().lower()
+    if not API_SIZE_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("--size must be auto or WIDTHxHEIGHT")
+    return value
 
 
 def save_image(
@@ -342,7 +334,6 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     api_key, auth_path = load_api_key(home, args.auth_file)
     base_url, config_path = load_base_url(home, args.base_url)
     prompt = read_prompt(args.prompt, args.prompt_file)
-    args.api_size = detect_api_size(prompt)
 
     if args.command == "edit":
         args.image_paths = [existing_file(raw, "Input image") for raw in args.image]
@@ -418,6 +409,7 @@ def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-compression", type=int)
     parser.add_argument("--background", choices=["transparent", "opaque", "auto"])
     parser.add_argument("--filename-prefix")
+    parser.add_argument("--size", type=parse_api_size, default=DEFAULT_SIZE)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--auth-file", help=argparse.SUPPRESS)
     parser.add_argument("--base-url", help=argparse.SUPPRESS)
@@ -446,6 +438,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise StreamImageError("--timeout must be greater than zero")
     if args.output_compression is not None and not 0 <= args.output_compression <= 100:
         raise StreamImageError("--output-compression must be between 0 and 100")
+    args.api_size = args.size
 
 
 def safe_error(exc: Exception) -> dict[str, Any]:
