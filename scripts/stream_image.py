@@ -235,6 +235,28 @@ def sanitize_prefix(value: str) -> str:
     return normalized or "generated"
 
 
+def runtime_os() -> str:
+    if os.name == "nt":
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    if os.name == "posix":
+        return "linux"
+    raise StreamImageError(f"Unsupported operating system for image display: {os.name}")
+
+
+def display_path(path: Path) -> str:
+    absolute_path = path.resolve()
+    rendered = absolute_path.as_posix()
+    operating_system = runtime_os()
+    if operating_system == "windows":
+        if not re.fullmatch(r"[A-Za-z]:/.*", rendered):
+            raise StreamImageError(f"Unsupported Windows image path: {absolute_path}")
+    elif not rendered.startswith("/"):
+        raise StreamImageError(f"Unsupported POSIX image path: {absolute_path}")
+    return rendered
+
+
 def parse_api_size(raw: str) -> str:
     value = raw.strip().lower()
     if not API_SIZE_PATTERN.fullmatch(value):
@@ -383,6 +405,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "ok": True,
         "operation": args.command,
         "path": str(path),
+        "display_path": display_path(path),
+        "runtime_os": runtime_os(),
         "format": image_format,
         "width": width,
         "height": height,

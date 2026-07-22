@@ -15,15 +15,15 @@ Use the bundled deterministic script for every generation or edit. Do not invoke
 4. Run `scripts/stream_image.py` with `uv run`.
 5. Treat only `image_generation.completed` or `image_edit.completed` as success. Never save a partial event as the final image.
 6. Read the JSON result from stdout and verify `ok` is true.
-7. Display the returned absolute `path` in the conversation using both forms. Prefer the cross-platform Markdown path format: keep the path absolute, convert backslashes to forward slashes, and do not wrap the image URL in angle brackets. Use the same normalized path for the image and the local-open link.
+7. Verify the returned `path` is an existing absolute file, then use only the returned `display_path` in the conversation. Never put raw `path` into Markdown and never construct a display path manually. The script determines `runtime_os` and emits an absolute display path with forward slashes.
 
    ```markdown
-   ![Generated image](/absolute/path/generated-image.png)
+   ![Generated image](<display_path>)
 
-   [Open local image](/absolute/path/generated-image.png)
+   [Open local image](<display_path>)
    ```
 
-   On Windows, convert `C:\Users\name\.codex\generated_images\image.png` to:
+   Require `runtime_os=windows` for a Windows result. Its `display_path` must use a drive prefix and forward slashes, for example:
 
    ```markdown
    ![Generated image](C:/Users/name/.codex/generated_images/image.png)
@@ -31,13 +31,15 @@ Use the bundled deterministic script for every generation or edit. Do not invoke
    [Open local image](C:/Users/name/.codex/generated_images/image.png)
    ```
 
-   On macOS or Linux, use the absolute POSIX path directly:
+   Require `runtime_os=macos` or `runtime_os=linux` for a POSIX result. Its `display_path` must start with `/`, for example:
 
    ```markdown
    ![Generated image](/Users/name/.codex/generated_images/image.png)
 
    [Open local image](/Users/name/.codex/generated_images/image.png)
    ```
+
+   If `runtime_os` is unsupported, `display_path` is absent, or its form does not match the operating system, do not emit a broken image link. Report the validation failure instead. Do not use `file://` URLs or backslashes in Markdown links.
 
 8. Report the path, format, dimensions, file size, SHA-256, event count, and final event type.
 
