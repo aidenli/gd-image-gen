@@ -13,9 +13,10 @@ Use the bundled deterministic script for every generation or edit. Do not invoke
 2. Preserve the user's prompt and add only necessary composition or invariant constraints.
 3. For edits, identify every input image explicitly and keep all file handles open while consuming the stream.
 4. Run `scripts/stream_image.py` with `uv run`.
-5. Treat only `image_generation.completed` or `image_edit.completed` as success. Never save a partial event as the final image.
-6. Read the JSON result from stdout and verify `ok` is true.
-7. Verify the returned `path` is an existing absolute file, then use only the returned `display_path` in the conversation. Never put raw `path` into Markdown and never construct a display path manually. The script determines `runtime_os` and emits an absolute display path with forward slashes.
+5. Keep the process running for up to 10 minutes. Do not terminate it merely because 2 minutes have elapsed; continue waiting unless it succeeds, returns an explicit failure, or reaches the 10-minute limit.
+6. Treat only `image_generation.completed` or `image_edit.completed` as success. Never save a partial event as the final image.
+7. Read the JSON result from stdout and verify `ok` is true.
+8. Verify the returned `path` is an existing absolute file, then use only the returned `display_path` in the conversation. Never put raw `path` into Markdown and never construct a display path manually. The script determines `runtime_os` and emits an absolute display path with forward slashes.
 
    ```markdown
    ![Generated image](<display_path>)
@@ -41,7 +42,15 @@ Use the bundled deterministic script for every generation or edit. Do not invoke
 
    If `runtime_os` is unsupported, `display_path` is absent, or its form does not match the operating system, do not emit a broken image link. Report the validation failure instead. Do not use `file://` URLs or backslashes in Markdown links.
 
-8. Report the path, format, dimensions, file size, SHA-256, event count, and final event type.
+9. Report the path, format, dimensions, file size, SHA-256, event count, and final event type.
+
+## Runtime Limit
+
+- Use a request timeout greater than 120 seconds and no greater than 600 seconds. Use the default 600 seconds unless the user explicitly requests another value within that range.
+- Treat 120 seconds only as the minimum allowed timeout, not as a reason to stop a still-running process. Do not terminate, cancel, or kill the process at the 2-minute mark solely because it is still running.
+- Stop immediately on a completed result or an explicit terminal failure; the process does not need to run for at least 2 minutes.
+- Terminate the request when its configured timeout is reached, and always terminate it no later than 600 seconds. Do not retry in a way that makes one requested asset exceed the 10-minute runtime limit.
+- When the command yields a live execution session, keep polling that same session until it exits or reaches the limit. Do not start a duplicate request while the original process is still running.
 
 ## Commands
 
@@ -52,7 +61,8 @@ $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { "$HOME\.codex" }
 uv run "$codexHome\skills\gd-image-gen\scripts\stream_image.py" generate `
   --prompt "<prompt>" `
   --size "<resolved-size>" `
-  --quality medium
+  --quality medium `
+  --timeout 600
 ```
 
 Edit one or more images:
@@ -63,7 +73,8 @@ uv run "$codexHome\skills\gd-image-gen\scripts\stream_image.py" edit `
   --prompt "<edit instructions and invariants>" `
   --image "C:\absolute\input.png" `
   --size "<resolved-size>" `
-  --quality medium
+  --quality medium `
+  --timeout 600
 ```
 
 Repeat `--image` for multiple inputs. Add `--mask` only when the user supplied a mask. Run the script once per distinct requested asset.
@@ -81,7 +92,7 @@ Repeat `--image` for multiple inputs. Add `--mask` only when the user supplied a
 - Read `OPENAI_API_KEY` from `$CODEX_HOME/auth.json`; also accept `$CODEX_HOME/auth.js` when it contains JSON or a literal `OPENAI_API_KEY` assignment.
 - Never print, log, pass on the command line, or copy the API key into another file.
 - Read the active `model_provider` and its `base_url` from `$CODEX_HOME/config.toml`.
-- Keep `stream=True`, `partial_images=1`, a long request timeout, and SDK retries disabled.
+- Keep `stream=True`, `partial_images=1`, the request timeout within `(120, 600]` seconds, and SDK retries disabled.
 - Never log image bytes or Base64. Log stream event types and aggregate counts only.
 
 ## Output And Failure Rules

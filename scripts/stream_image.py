@@ -29,7 +29,9 @@ DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "auto"
 DEFAULT_QUALITY = "medium"
 DEFAULT_OUTPUT_FORMAT = "png"
-DEFAULT_TIMEOUT_SECONDS = 1800.0
+MIN_TIMEOUT_SECONDS = 120.0
+MAX_TIMEOUT_SECONDS = 600.0
+DEFAULT_TIMEOUT_SECONDS = MAX_TIMEOUT_SECONDS
 DEFAULT_PARTIAL_IMAGES = 1
 API_SIZE_PATTERN = re.compile(r"(?:auto|[1-9][0-9]*x[1-9][0-9]*)\Z")
 FORMAT_EXTENSIONS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
@@ -458,8 +460,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.timeout <= 0:
-        raise StreamImageError("--timeout must be greater than zero")
+    if not MIN_TIMEOUT_SECONDS < args.timeout <= MAX_TIMEOUT_SECONDS:
+        raise StreamImageError(
+            "--timeout must be greater than 120 and no greater than 600 seconds"
+        )
     if args.output_compression is not None and not 0 <= args.output_compression <= 100:
         raise StreamImageError("--output-compression must be between 0 and 100")
     args.api_size = args.size
