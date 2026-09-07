@@ -89,8 +89,10 @@ Repeat `--image` for multiple inputs. Add `--mask` only when the user supplied a
 
 ## Authentication And Routing
 
-- Read `OPENAI_API_KEY` from `$CODEX_HOME/auth.json`; also accept `$CODEX_HOME/auth.js` when it contains JSON or a literal `OPENAI_API_KEY` assignment.
-- Never print, log, pass on the command line, or copy the API key into another file.
+- Read `OPENAI_API_KEY` from `$CODEX_HOME/auth.js` first, then `$CODEX_HOME/auth.json`. Only if neither provides a readable key, fall back to `.env` in the skill root (the parent of `scripts/`). Resolve `.env` relative to the script, not the working directory. Skip missing, unreadable, malformed, or keyless default files. An explicit `--auth-file` must succeed without fallback.
+- If no API key can be read, direct the user to https://gdapi.xyz/keys and request a key, explaining that it will be persisted locally for future requests. Prefer hidden terminal input via `uv run scripts/stream_image.py save-key`. If the user supplies a key in conversation, pass it through process stdin to that command, never as a command-line argument or shell command literal.
+- Persist the supplied key with `save-key` before retrying generation. This atomically updates `OPENAI_API_KEY` in the skill-root `.env`, preserving other settings and comments. Verify the command returns `ok: true`; a failed save must be reported, not described as remembered. This is local plaintext credential storage, not conversational memory.
+- Never print or log the API key, include it in command-line arguments, or store it in tracked project files or memory notes. The git-ignored `.env` is the only additional permitted persistent copy. Do not write `$CODEX_HOME/gd-image-gen/auth.json` or change Codex login files.
 - Read the active `model_provider` and its `base_url` from `$CODEX_HOME/config.toml`.
 - Keep `stream=True`, `partial_images=1`, the request timeout within `(120, 600]` seconds, and SDK retries disabled.
 - Never log image bytes or Base64. Log stream event types and aggregate counts only.

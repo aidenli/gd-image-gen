@@ -3,6 +3,7 @@
 # dependencies = [
 #   "openai>=2.38.0,<3",
 #   "pillow>=10.0.0,<13",
+#   "python-dotenv>=1.0,<2",
 # ]
 # ///
 
@@ -24,6 +25,8 @@ import tempfile
 import tomllib
 from typing import Any, Iterable
 
+from dotenv import dotenv_values, set_key
+
 
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_SIZE = "auto"
@@ -33,6 +36,7 @@ MIN_TIMEOUT_SECONDS = 120.0
 MAX_TIMEOUT_SECONDS = 600.0
 DEFAULT_TIMEOUT_SECONDS = MAX_TIMEOUT_SECONDS
 DEFAULT_PARTIAL_IMAGES = 1
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 API_SIZE_PATTERN = re.compile(r"(?:auto|[1-9][0-9]*x[1-9][0-9]*)\Z")
 FORMAT_EXTENSIONS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
 EXPECTED_COMPLETED_TYPES = {
@@ -76,21 +80,54 @@ def load_api_key(home: Path, explicit_auth: str | None = None) -> tuple[str, Pat
     candidates = (
         [Path(explicit_auth).expanduser().resolve()]
         if explicit_auth
-        else [home / "auth.js", home / "auth.json"]
+        else [home / "auth.js", home / "auth.json", ENV_PATH]
     )
     for path in candidates:
         if not path.is_file():
             continue
         try:
-            auth = _parse_auth_text(path.read_text(encoding="utf-8"), path)
+            auth = (
+                dotenv_values(path, interpolate=False)
+                if path.name == ".env"
+                else _parse_auth_text(path.read_text(encoding="utf-8"), path)
+            )
+        except StreamImageError:
+            if explicit_auth:
+                raise
+            continue
         except (OSError, UnicodeError) as exc:
+            if not explicit_auth:
+                continue
             raise StreamImageError(f"Could not read Codex auth file: {path}") from exc
         key = auth.get("OPENAI_API_KEY")
         if isinstance(key, str) and key.strip():
             return key.strip(), path
-        raise StreamImageError(f"OPENAI_API_KEY is missing from Codex auth file: {path}")
+        if explicit_auth:
+            raise StreamImageError(f"OPENAI_API_KEY is missing from Codex auth file: {path}")
     names = ", ".join(str(path) for path in candidates)
-    raise StreamImageError(f"Codex auth file not found; checked: {names}")
+    raise StreamImageError(f"No readable API key; checked: {names}. Run save-key to persist a key.")
+
+
+def save_api_key(key: str) -> Path:
+    key = key.strip()
+    if not key or any(character.isspace() or not character.isprintable() for character in key):
+        raise StreamImageError("API key must be non-empty and contain no whitespace or control characters")
+    destination = ENV_PATH
+    directory = destination.parent
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            if destination.exists():
+                temporary.write(destination.read_text(encoding="utf-8"))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        set_key(temporary_path, "OPENAI_API_KEY", key)
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return destination
 
 
 def load_base_url(home: Path, explicit_base_url: str | None = None) -> tuple[str, Path | None]:
@@ -376,7 +413,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
 
     client = OpenAI(
         api_key=api_key,
-        base_url=base_url,
+        base_url=base_url + "/v1",
         timeout=args.timeout,
         max_retries=0,
     )
@@ -447,6 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Generate or edit an image through the Codex-configured streaming Images API"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("save-key", help="Persist an API key from hidden terminal input or stdin")
 
     generate = subparsers.add_parser("generate")
     add_shared_arguments(generate)
@@ -483,8 +521,15 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        validate_args(args)
-        result = execute(args)
+        if args.command == "save-key":
+            from getpass import getpass
+
+            key = getpass("API key: ") if sys.stdin.isatty() else sys.stdin.read()
+            path = save_api_key(key)
+            result = {"ok": True, "auth_file": str(path)}
+        else:
+            validate_args(args)
+            result = execute(args)
     except Exception as exc:
         print(json.dumps(safe_error(exc), ensure_ascii=True), file=sys.stderr)
         return 1
