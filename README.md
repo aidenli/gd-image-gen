@@ -23,10 +23,12 @@ Codex discovers the skill from `SKILL.md`. Its UI metadata is in `agents/openai.
 ## Requirements
 
 - Install [`uv`](https://docs.astral.sh/uv/).
-- Configure a Codex API key in `$CODEX_HOME/auth.json` or `$CODEX_HOME/auth.js`.
-- Configure the active model provider and its `base_url` in `$CODEX_HOME/config.toml`.
+- Configure `experimental_bearer_token` in `$CODEX_HOME/config.toml`, or `OPENAI_API_KEY` in `$CODEX_HOME/auth.json`.
+- Requests use the active provider's `base_url` from `$CODEX_HOME/config.toml`.
 
-The script checks `$CODEX_HOME/auth.js`, then `$CODEX_HOME/auth.json`. Only when neither provides a readable key does it fall back to `.env` in the skill root (the parent of `scripts/`, regardless of working directory). To persist a fallback key, run `uv run scripts/stream_image.py save-key` and enter it at the hidden prompt (automation can use stdin). The command atomically updates `OPENAI_API_KEY` in this git-ignored `.env`, preserving other settings and comments; future requests reuse it as a fallback. Credentials are stored as local plaintext. Do not put an API key in a command line, prompt file, or tracked repository file.
+The script checks `experimental_bearer_token` first, then `OPENAI_API_KEY` in `$CODEX_HOME/auth.json`. For backward compatibility it can fall back to `$CODEX_HOME/auth.js` and the skill-root `.env`. To persist a fallback key, run `uv run scripts/stream_image.py save-key` and enter it at the hidden prompt (automation can use stdin). The command atomically updates `OPENAI_API_KEY` in this git-ignored `.env`, preserving other settings and comments; future requests reuse it as a fallback. Credentials are stored as local plaintext. Do not put an API key in a command line, prompt file, or tracked repository file.
+
+The default model is `gpt-image-2.5-flare`; use `gpt-image-2.5-sunburst` or `gpt-image-2` with `--model` when needed.
 
 ## Use
 

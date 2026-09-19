@@ -28,7 +28,7 @@ from typing import Any, Iterable
 from dotenv import dotenv_values, set_key
 
 
-DEFAULT_MODEL = "gpt-image-2"
+DEFAULT_MODEL = "gpt-image-2.5-flare"
 DEFAULT_SIZE = "auto"
 DEFAULT_QUALITY = "medium"
 DEFAULT_OUTPUT_FORMAT = "png"
@@ -77,11 +77,23 @@ def _parse_auth_text(raw: str, source: Path) -> dict[str, Any]:
 
 
 def load_api_key(home: Path, explicit_auth: str | None = None) -> tuple[str, Path]:
-    candidates = (
-        [Path(explicit_auth).expanduser().resolve()]
-        if explicit_auth
-        else [home / "auth.js", home / "auth.json", ENV_PATH]
-    )
+    if explicit_auth:
+        candidates = [Path(explicit_auth).expanduser().resolve()]
+    else:
+        config_path = home / "config.toml"
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, tomllib.TOMLDecodeError):
+            config = {}
+        token = config.get("experimental_bearer_token")
+        if not isinstance(token, str):
+            provider_name = config.get("model_provider")
+            providers = config.get("model_providers")
+            provider = providers.get(provider_name) if isinstance(providers, dict) else None
+            token = provider.get("experimental_bearer_token") if isinstance(provider, dict) else None
+        if isinstance(token, str) and token.strip():
+            return token.strip(), config_path
+        candidates = [home / "auth.json", home / "auth.js", ENV_PATH]
     for path in candidates:
         if not path.is_file():
             continue
@@ -130,9 +142,7 @@ def save_api_key(key: str) -> Path:
     return destination
 
 
-def load_base_url(home: Path, explicit_base_url: str | None = None) -> tuple[str, Path | None]:
-    if explicit_base_url:
-        return explicit_base_url.rstrip("/"), None
+def load_base_url(home: Path) -> tuple[str, Path]:
     config_path = home / "config.toml"
     try:
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -141,17 +151,15 @@ def load_base_url(home: Path, explicit_base_url: str | None = None) -> tuple[str
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise StreamImageError(f"Could not parse Codex config file: {config_path}") from exc
 
-    provider_name = config.get("model_provider")
-    providers = config.get("model_providers")
-    if not isinstance(provider_name, str) or not isinstance(providers, dict):
-        raise StreamImageError("Codex config does not define model_provider/model_providers")
-    provider = providers.get(provider_name)
-    base_url = provider.get("base_url") if isinstance(provider, dict) else None
+    base_url = config.get("base_url")
     if not isinstance(base_url, str) or not base_url.strip():
-        raise StreamImageError(
-            f"Codex model provider {provider_name!r} does not define base_url"
-        )
-    return base_url.rstrip("/"), config_path
+        provider_name = config.get("model_provider")
+        providers = config.get("model_providers")
+        provider = providers.get(provider_name) if isinstance(providers, dict) else None
+        base_url = provider.get("base_url") if isinstance(provider, dict) else None
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise StreamImageError("Codex config does not define base_url")
+    return base_url.strip().rstrip("/"), config_path
 
 
 def read_prompt(prompt: str | None, prompt_file: str | None) -> str:
@@ -381,6 +389,7 @@ def dry_run_result(
         "auth_file": str(auth_path),
         "config_file": str(config_path) if config_path else None,
         "request_url": base_url + endpoint,
+        "model": args.model,
         "prompt_length": len(prompt),
         "stream": True,
         "partial_images": DEFAULT_PARTIAL_IMAGES,
@@ -393,7 +402,7 @@ def dry_run_result(
 def execute(args: argparse.Namespace) -> dict[str, Any]:
     home = codex_home()
     api_key, auth_path = load_api_key(home, args.auth_file)
-    base_url, config_path = load_base_url(home, args.base_url)
+    base_url, config_path = load_base_url(home)
     prompt = read_prompt(args.prompt, args.prompt_file)
 
     if args.command == "edit":
@@ -413,7 +422,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
 
     client = OpenAI(
         api_key=api_key,
-        base_url=base_url + "/v1",
+        base_url=base_url,
         timeout=args.timeout,
         max_retries=0,
     )
@@ -475,7 +484,6 @@ def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--size", type=parse_api_size, default=DEFAULT_SIZE)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--auth-file", help=argparse.SUPPRESS)
-    parser.add_argument("--base-url", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
 
 
