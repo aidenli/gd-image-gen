@@ -8,7 +8,7 @@ import shutil
 from unittest.mock import patch
 
 import stream_image
-from stream_image import load_api_key, save_api_key, StreamImageError
+from stream_image import load_api_key, load_base_url, save_api_key, StreamImageError
 
 
 with tempfile.TemporaryDirectory() as temporary:
@@ -21,6 +21,20 @@ with tempfile.TemporaryDirectory() as temporary:
     (home / "auth.js").write_text("invalid", encoding="utf-8")
     (home / "auth.json").write_text('{"OPENAI_API_KEY":"codex-test"}', encoding="utf-8")
     assert load_api_key(home)[0] == "codex-test"
+    (home / "config.toml").write_text(
+        'experimental_bearer_token = "config-test"\n'
+        'model_provider = "ai"\n'
+        '[model_providers.ai]\n'
+        'base_url = "https://config.example/v1/"\n',
+        encoding="utf-8",
+    )
+    assert load_api_key(home)[0] == "config-test"
+    assert load_base_url(home)[0] == "https://config.example/v1"
+    assert (
+        stream_image.build_parser().parse_args(["generate", "--prompt", "test"]).model
+        == "gpt-image-2.5-flare"
+    )
+    (home / "config.toml").unlink()
     original = (home / "auth.json").read_bytes()
     command = [sys.executable, str(script_directory / "stream_image.py"), "save-key"]
     result = subprocess.run(command, input="fallback-test\n", text=True, capture_output=True,
@@ -33,6 +47,7 @@ with tempfile.TemporaryDirectory() as temporary:
     assert not (home / "gd-image-gen" / "auth.json").exists()
     assert (home / "auth.json").read_bytes() == original
     assert load_api_key(home, str(home / "auth.json"))[0] == "codex-test"
+    (home / "auth.json").unlink()
     (home / "auth.js").write_text('{"OPENAI_API_KEY":"codex-js-test"}', encoding="utf-8")
     assert load_api_key(home)[0] == "codex-js-test"
     (home / "auth.js").write_text("invalid", encoding="utf-8")
