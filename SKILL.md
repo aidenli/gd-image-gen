@@ -43,6 +43,7 @@ Use the bundled deterministic script for every generation or edit. Do not invoke
    If `runtime_os` is unsupported, `display_path` is absent, or its form does not match the operating system, do not emit a broken image link. Report the validation failure instead. Do not use `file://` URLs or backslashes in Markdown links.
 
 9. Report the path, format, dimensions, file size, SHA-256, event count, and final event type.
+10. After the completed result passes the file/path checks above, display it immediately with the returned `display_path`. Do not perform visual inspection or call an image-viewing tool before displaying it.
 
 ## Runtime Limit
 
