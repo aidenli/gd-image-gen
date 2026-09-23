@@ -1,6 +1,6 @@
 ---
 name: gd-image-gen
-description: Generate or edit raster images through the Codex-configured OpenAI-compatible Images API using mandatory SSE streaming. Always use this skill for image generation and image editing in this Codex installation instead of the built-in image_gen tool, including long-running edits, reference-image work, variants, and requests that must be displayed in the conversation. Read the API key from experimental_bearer_token in Codex config.toml, falling back to OPENAI_API_KEY in auth.json; use the active provider base_url from config.toml, default to gpt-image-2.5-flare, save completed images under CODEX_HOME/generated_images, and never treat partial stream events as final images.
+description: Generate or edit raster images through the Codex-configured OpenAI-compatible Images API using direct non-streaming requests. Always use this skill for image generation and image editing in this Codex installation instead of the built-in image_gen tool, including reference-image work, variants, and requests that must be displayed in the conversation. Read the API key from experimental_bearer_token in Codex config.toml, falling back to OPENAI_API_KEY in auth.json; use the active provider base_url from config.toml, default to gpt-image-2.5-flare, and save completed images under CODEX_HOME/generated_images.
 ---
 
 # GD Image Gen
@@ -11,12 +11,11 @@ Use the bundled deterministic script for every generation or edit. Do not invoke
 
 1. Decide whether the request is `generate` or `edit`.
 2. Preserve the user's prompt and add only necessary composition or invariant constraints.
-3. For edits, identify every input image explicitly and keep all file handles open while consuming the stream.
-4. Run `scripts/stream_image.py` with `uv run`.
+3. For edits, identify every input image explicitly; the script keeps input files open for the duration of the direct request.
+4. Run `scripts/stream_image.py` with `uv run`. The script name is retained for compatibility; the request itself is non-streaming.
 5. Keep the process running for up to 10 minutes. Do not terminate it merely because 2 minutes have elapsed; continue waiting unless it succeeds, returns an explicit failure, or reaches the 10-minute limit.
-6. Treat only `image_generation.completed` or `image_edit.completed` as success. Never save a partial event as the final image.
-7. Read the JSON result from stdout and verify `ok` is true.
-8. Verify the returned `path` is an existing absolute file, then use only the returned `display_path` in the conversation. Never put raw `path` into Markdown and never construct a display path manually. The script determines `runtime_os` and emits an absolute display path with forward slashes.
+6. Read the JSON result from stdout and verify `ok` is true.
+7. Verify the returned `path` is an existing absolute file, then use only the returned `display_path` in the conversation. Never put raw `path` into Markdown and never construct a display path manually. The script determines `runtime_os` and emits an absolute display path with forward slashes.
 
    ```markdown
    ![Generated image](<display_path>)
@@ -42,8 +41,8 @@ Use the bundled deterministic script for every generation or edit. Do not invoke
 
    If `runtime_os` is unsupported, `display_path` is absent, or its form does not match the operating system, do not emit a broken image link. Report the validation failure instead. Do not use `file://` URLs or backslashes in Markdown links.
 
-9. Report the path, format, dimensions, file size, SHA-256, event count, and final event type.
-10. After the completed result passes the file/path checks above, display it immediately with the returned `display_path`. Do not perform visual inspection or call an image-viewing tool before displaying it.
+8. Report the path, format, dimensions, file size, SHA-256, and `request_mode`.
+9. After the result passes the file/path checks above, display it immediately with the returned `display_path`. Do not perform visual inspection or call an image-viewing tool before displaying it.
 
 ## Runtime Limit
 
@@ -97,15 +96,15 @@ The default model is `gpt-image-2.5-flare`. Use `--model gpt-image-2.5-sunburst`
 - Persist the supplied key with `save-key` before retrying generation. This atomically updates `OPENAI_API_KEY` in the skill-root `.env`, preserving other settings and comments. Verify the command returns `ok: true`; a failed save must be reported, not described as remembered. This is local plaintext credential storage, not conversational memory.
 - Never print or log the API key, include it in command-line arguments, or store it in tracked project files or memory notes. The git-ignored `.env` is the only additional permitted persistent copy. Do not write `$CODEX_HOME/gd-image-gen/auth.json` or change Codex login files.
 - Read `base_url` from the active model provider in `$CODEX_HOME/config.toml`. Trim only trailing slashes; do not append another `/v1`.
-- Keep `stream=True`, `partial_images=1`, the request timeout within `(120, 600]` seconds, and SDK retries disabled.
-- Never log image bytes or Base64. Log stream event types and aggregate counts only.
+- Keep the request timeout within `(120, 600]` seconds and SDK retries disabled.
+- Never log image bytes or Base64. Log only safe request/result metadata.
 
 ## Output And Failure Rules
 
-- Save only completed images under `$CODEX_HOME/generated_images` using an atomic replacement.
-- Strictly decode Base64, validate the complete image with Pillow, and calculate SHA-256 after writing.
+- Save only returned complete images under `$CODEX_HOME/generated_images` using an atomic replacement.
+- Strictly decode the returned Base64, validate the complete image with Pillow, and calculate SHA-256 after writing.
 - Do not crop or resize the completed image after generation.
-- Fail if the stream closes without the matching completed event, even if partial images were received.
-- Fail generation-to-edit workflows immediately when generation fails. Never substitute an older image.
-- Do not make a non-streaming retry and do not switch to the built-in image tool after failure.
+- Fail if the API response contains no image data.
+- Fail generation-to-edit workflows immediately when generation fails. Never substitute an older image or retry through another request mode.
+- Do not switch to the built-in image tool or another provider after failure.
 - Do not overwrite an unrelated existing file.

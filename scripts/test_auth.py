@@ -49,6 +49,8 @@ with tempfile.TemporaryDirectory() as temporary:
     assert load_api_key(home, str(home / "auth.json"))[0] == "codex-test"
     (home / "auth.json").unlink()
     (home / "auth.js").write_text('{"OPENAI_API_KEY":"codex-js-test"}', encoding="utf-8")
+    assert load_api_key(home)[0] == "codex-test"
+    (home / "auth.json").unlink()
     assert load_api_key(home)[0] == "codex-js-test"
     (home / "auth.js").write_text("invalid", encoding="utf-8")
     (home / "auth.json").write_text("{}", encoding="utf-8")

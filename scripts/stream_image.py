@@ -23,7 +23,7 @@ import re
 import sys
 import tempfile
 import tomllib
-from typing import Any, Iterable
+from typing import Any
 
 from dotenv import dotenv_values, set_key
 
@@ -35,18 +35,9 @@ DEFAULT_OUTPUT_FORMAT = "png"
 MIN_TIMEOUT_SECONDS = 120.0
 MAX_TIMEOUT_SECONDS = 600.0
 DEFAULT_TIMEOUT_SECONDS = MAX_TIMEOUT_SECONDS
-DEFAULT_PARTIAL_IMAGES = 1
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 API_SIZE_PATTERN = re.compile(r"(?:auto|[1-9][0-9]*x[1-9][0-9]*)\Z")
 FORMAT_EXTENSIONS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
-EXPECTED_COMPLETED_TYPES = {
-    "generate": "image_generation.completed",
-    "edit": "image_edit.completed",
-}
-PARTIAL_TYPES = {
-    "generate": "image_generation.partial_image",
-    "edit": "image_edit.partial_image",
-}
 
 
 class StreamImageError(RuntimeError):
@@ -185,75 +176,13 @@ def existing_file(raw: str, label: str) -> Path:
     return path
 
 
-def event_dict(event: Any) -> dict[str, Any]:
-    if hasattr(event, "model_dump"):
-        value = event.model_dump(mode="json", exclude_none=True)
-    elif isinstance(event, dict):
-        value = event
-    else:
-        value = {
-            "type": getattr(event, "type", type(event).__name__),
-            "b64_json": getattr(event, "b64_json", None),
-        }
-    return value if isinstance(value, dict) else {}
-
-
-def consume_stream(stream: Iterable[Any], operation: str) -> tuple[str, dict[str, Any]]:
-    expected_completed = EXPECTED_COMPLETED_TYPES[operation]
-    expected_partial = PARTIAL_TYPES[operation]
-    completed_b64: str | None = None
-    event_count = 0
-    partial_count = 0
-    last_event_type: str | None = None
-    try:
-        for event in stream:
-            event_count += 1
-            data = event_dict(event)
-            event_type = str(data.get("type") or type(event).__name__)
-            last_event_type = event_type
-            if event_type == expected_partial:
-                partial_count += 1
-            elif event_type == expected_completed:
-                encoded = data.get("b64_json")
-                if not isinstance(encoded, str) or not encoded:
-                    raise StreamImageError(f"{expected_completed} did not contain b64_json")
-                completed_b64 = encoded
-            print(
-                json.dumps(
-                    {
-                        "stream_event": event_count,
-                        "type": event_type,
-                        "has_image": isinstance(data.get("b64_json"), str),
-                    },
-                    ensure_ascii=True,
-                ),
-                file=sys.stderr,
-            )
-    finally:
-        close = getattr(stream, "close", None)
-        if callable(close):
-            close()
-
-    if completed_b64 is None:
-        raise StreamImageError(
-            f"Stream ended without {expected_completed}; events={event_count}, "
-            f"partials={partial_count}, last={last_event_type or 'none'}"
-        )
-    return completed_b64, {
-        "event_count": event_count,
-        "partial_event_count": partial_count,
-        "completed_event_type": expected_completed,
-        "last_event_type": last_event_type,
-    }
-
-
 def decode_and_validate_image(encoded: str, requested_format: str) -> tuple[bytes, str, int, int]:
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise StreamImageError("Completed event contained invalid Base64 image data") from exc
+        raise StreamImageError("API response contained invalid Base64 image data") from exc
     if not data:
-        raise StreamImageError("Completed event contained an empty image")
+        raise StreamImageError("API response contained empty image data")
 
     try:
         from PIL import Image
@@ -265,7 +194,7 @@ def decode_and_validate_image(encoded: str, requested_format: str) -> tuple[byte
             width, height = image.size
             image.load()
     except Exception as exc:
-        raise StreamImageError("Completed event did not contain a valid complete image") from exc
+        raise StreamImageError("API response did not contain a valid complete image") from exc
 
     expected = "JPEG" if requested_format == "jpeg" else requested_format.upper()
     if detected_format != expected:
@@ -273,7 +202,7 @@ def decode_and_validate_image(encoded: str, requested_format: str) -> tuple[byte
             f"Image format mismatch: requested {expected}, received {detected_format or 'unknown'}"
         )
     if width <= 0 or height <= 0:
-        raise StreamImageError("Completed image dimensions are invalid")
+        raise StreamImageError("Image dimensions are invalid")
     return data, detected_format, width, height
 
 
@@ -319,7 +248,7 @@ def save_image(
 ) -> tuple[Path, str]:
     extension = FORMAT_EXTENSIONS.get(image_format)
     if extension is None:
-        raise StreamImageError(f"Unsupported completed image format: {image_format}")
+        raise StreamImageError(f"Unsupported image format: {image_format}")
     digest = hashlib.sha256(data).hexdigest()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     prefix = sanitize_prefix(filename_prefix)
@@ -349,7 +278,7 @@ def save_image(
     written_digest = hashlib.sha256(destination.read_bytes()).hexdigest()
     if written_digest != digest:
         destination.unlink(missing_ok=True)
-        raise StreamImageError("Saved image SHA-256 does not match the completed event")
+        raise StreamImageError("Saved image SHA-256 does not match the API response")
     return destination, digest
 
 
@@ -361,8 +290,6 @@ def request_payload(args: argparse.Namespace, prompt: str) -> dict[str, Any]:
         "size": args.api_size,
         "quality": args.quality,
         "output_format": args.output_format,
-        "stream": True,
-        "partial_images": DEFAULT_PARTIAL_IMAGES,
     }
     if args.background is not None:
         payload["background"] = args.background
@@ -391,8 +318,6 @@ def dry_run_result(
         "request_url": base_url + endpoint,
         "model": args.model,
         "prompt_length": len(prompt),
-        "stream": True,
-        "partial_images": DEFAULT_PARTIAL_IMAGES,
         "api_size": args.api_size,
         "output_dir": str((home / "generated_images").resolve()),
         "images": [str(path) for path in getattr(args, "image_paths", [])],
@@ -429,17 +354,25 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     payload = request_payload(args, prompt)
     try:
         if args.command == "generate":
-            stream = client.images.generate(**payload)
-            completed_b64, stream_metrics = consume_stream(stream, "generate")
+            response = client.images.generate(**payload)
+            if not response.data or not response.data[0].b64_json:
+                raise StreamImageError("Non-streaming generation returned no image data")
+            completed_b64 = response.data[0].b64_json
+            request_metrics = {"request_mode": "non_streaming"}
         else:
             with ExitStack() as stack:
                 image_files = [stack.enter_context(path.open("rb")) for path in args.image_paths]
                 request = dict(payload)
                 request["image"] = image_files if len(image_files) > 1 else image_files[0]
+                mask_file = None
                 if args.mask_path is not None:
-                    request["mask"] = stack.enter_context(args.mask_path.open("rb"))
-                stream = client.images.edit(**request)
-                completed_b64, stream_metrics = consume_stream(stream, "edit")
+                    mask_file = stack.enter_context(args.mask_path.open("rb"))
+                    request["mask"] = mask_file
+                response = client.images.edit(**request)
+                if not response.data or not response.data[0].b64_json:
+                    raise StreamImageError("Non-streaming edit returned no image data")
+                completed_b64 = response.data[0].b64_json
+                request_metrics = {"request_mode": "non_streaming"}
     finally:
         client.close()
 
@@ -461,7 +394,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "api_size": args.api_size,
         "size": path.stat().st_size,
         "sha256": digest,
-        **stream_metrics,
+        **request_metrics,
     }
 
 
@@ -489,7 +422,7 @@ def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate or edit an image through the Codex-configured streaming Images API"
+        description="Generate or edit an image through the Codex-configured Images API"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("save-key", help="Persist an API key from hidden terminal input or stdin")
@@ -521,7 +454,7 @@ def safe_error(exc: Exception) -> dict[str, Any]:
         "ok": False,
         "error_type": type(exc).__name__,
         "status_code": status_code if isinstance(status_code, int) else None,
-        "error": str(exc) if isinstance(exc, StreamImageError) else "Streaming image request failed",
+        "error": str(exc) if isinstance(exc, StreamImageError) else "Image request failed",
     }
 
 
