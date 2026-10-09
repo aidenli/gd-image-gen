@@ -77,7 +77,7 @@ def load_api_key(home: Path, explicit_auth: str | None = None) -> tuple[str, Pat
         except (FileNotFoundError, OSError, UnicodeError, tomllib.TOMLDecodeError):
             config = {}
         token = config.get("experimental_bearer_token")
-        if not isinstance(token, str):
+        if not isinstance(token, str) or not token.strip():
             provider_name = config.get("model_provider")
             providers = config.get("model_providers")
             provider = providers.get(provider_name) if isinstance(providers, dict) else None

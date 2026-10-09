@@ -34,6 +34,19 @@ with tempfile.TemporaryDirectory() as temporary:
         stream_image.build_parser().parse_args(["generate", "--prompt", "test"]).model
         == "gpt-image-2.5-flare"
     )
+    assert load_api_key(home, str(home / "auth.json"))[0] == "codex-test"
+    for top_level in ('', 'experimental_bearer_token = "   "\n', 'experimental_bearer_token = 123\n'):
+        (home / "config.toml").write_text(
+            top_level + 'model_provider = "ai"\n'
+            '[model_providers.other]\nexperimental_bearer_token = "other-test"\n'
+            '[model_providers.ai]\nexperimental_bearer_token = " provider-test "\n',
+            encoding="utf-8",
+        )
+        assert load_api_key(home) == ("provider-test", home / "config.toml")
+    for config_text in ('experimental_bearer_token = " "\n', 'invalid toml',
+                        'model_provider = "ai"\n[model_providers.ai]\nexperimental_bearer_token = 123\n'):
+        (home / "config.toml").write_text(config_text, encoding="utf-8")
+        assert load_api_key(home)[0] == "codex-test"
     (home / "config.toml").unlink()
     original = (home / "auth.json").read_bytes()
     command = [sys.executable, str(script_directory / "stream_image.py"), "save-key"]
@@ -47,7 +60,6 @@ with tempfile.TemporaryDirectory() as temporary:
     assert not (home / "gd-image-gen" / "auth.json").exists()
     assert (home / "auth.json").read_bytes() == original
     assert load_api_key(home, str(home / "auth.json"))[0] == "codex-test"
-    (home / "auth.json").unlink()
     (home / "auth.js").write_text('{"OPENAI_API_KEY":"codex-js-test"}', encoding="utf-8")
     assert load_api_key(home)[0] == "codex-test"
     (home / "auth.json").unlink()
