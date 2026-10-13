@@ -55,15 +55,15 @@ with tempfile.TemporaryDirectory() as temporary:
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["ok"] is True
     assert "fallback-test" not in result.stdout + result.stderr
-    assert load_api_key(home)[0] == "codex-test"
+    assert load_api_key(home)[0] == "fallback-test"
     assert stream_image.ENV_PATH.read_text(encoding="utf-8").startswith("# Keep this\nOTHER=value\n")
     assert not (home / "gd-image-gen" / "auth.json").exists()
     assert (home / "auth.json").read_bytes() == original
     assert load_api_key(home, str(home / "auth.json"))[0] == "codex-test"
     (home / "auth.js").write_text('{"OPENAI_API_KEY":"codex-js-test"}', encoding="utf-8")
-    assert load_api_key(home)[0] == "codex-test"
+    assert load_api_key(home)[0] == "fallback-test"
     (home / "auth.json").unlink()
-    assert load_api_key(home)[0] == "codex-js-test"
+    assert load_api_key(home)[0] == "fallback-test"
     (home / "auth.js").write_text("invalid", encoding="utf-8")
     (home / "auth.json").write_text("{}", encoding="utf-8")
     assert load_api_key(home)[0] == "fallback-test"
@@ -94,4 +94,43 @@ with tempfile.TemporaryDirectory() as temporary:
     special_key = "test-'quoted'-${LITERAL}-#-\\end"
     save_api_key(special_key)
     assert load_api_key(home)[0] == special_key
-print("Auth persistence checks passed")
+    stream_image.save_configuration(base_url="https://local.example/v1/", api_key="configured-test")
+    assert load_base_url(home) == ("https://local.example/v1", stream_image.ENV_PATH)
+    assert load_api_key(home)[0] == "configured-test"
+    stream_image.save_configuration(base_url="https://updated.example/v1")
+    assert load_api_key(home)[0] == "configured-test"
+    before = stream_image.ENV_PATH.read_bytes()
+    for url in ("", "example.com", "ftp://example.com", "https://user:secret@example.com", "https://example.com?key=secret", "https://example.com:bad"):
+        try:
+            stream_image.save_configuration(base_url=url, api_key="changed")
+        except StreamImageError:
+            pass
+        else:
+            raise AssertionError("Invalid URL accepted")
+        assert stream_image.ENV_PATH.read_bytes() == before
+    stream_image.ENV_PATH.unlink()
+    args = stream_image.build_parser().parse_args(["generate", "--prompt", "test", "--dry-run"])
+    stream_image.validate_args(args)
+    try:
+        with patch("stream_image.codex_home", return_value=home):
+            stream_image.execute(args)
+    except StreamImageError as exc:
+        assert "API Key:" in str(exc) and "Base URL:" in str(exc)
+    else:
+        raise AssertionError("Missing configuration accepted")
+    from openai import APIConnectionError, APITimeoutError, AuthenticationError, PermissionDeniedError, RateLimitError, InternalServerError
+    import httpx
+    request = httpx.Request("POST", "https://example.com/v1/images/generations")
+    for error, expected in ((APIConnectionError(request=request), "无法连接"), (APITimeoutError(request=request), "超时")):
+        assert expected in stream_image.safe_error(error)["error"]
+    for cls, status in ((AuthenticationError, 401), (PermissionDeniedError, 403), (RateLimitError, 429), (InternalServerError, 500)):
+        error = cls("secret-key-must-not-leak", response=httpx.Response(status, request=request), body=None)
+        result = stream_image.safe_error(error)
+        assert result["status_code"] == status
+        assert "secret-key" not in json.dumps(result)
+    result = subprocess.run([sys.executable, str(script_directory / "stream_image.py"), "configure", "--base-url", "https://cli.example/v1", "--api-key"], input="cli-secret-test", text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert "cli-secret-test" not in result.stdout + result.stderr
+    assert load_base_url(home)[0] == "https://cli.example/v1"
+    assert load_api_key(home)[0] == "cli-secret-test"
+print("Configuration and error feedback checks passed")

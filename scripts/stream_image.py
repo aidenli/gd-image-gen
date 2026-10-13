@@ -24,6 +24,7 @@ import sys
 import tempfile
 import tomllib
 from typing import Any
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values, set_key
 
@@ -71,6 +72,9 @@ def load_api_key(home: Path, explicit_auth: str | None = None) -> tuple[str, Pat
     if explicit_auth:
         candidates = [Path(explicit_auth).expanduser().resolve()]
     else:
+        local_key = dotenv_values(ENV_PATH, interpolate=False).get("OPENAI_API_KEY")
+        if isinstance(local_key, str) and local_key.strip():
+            return local_key.strip(), ENV_PATH
         config_path = home / "config.toml"
         try:
             config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -112,9 +116,34 @@ def load_api_key(home: Path, explicit_auth: str | None = None) -> tuple[str, Pat
 
 
 def save_api_key(key: str) -> Path:
-    key = key.strip()
-    if not key or any(character.isspace() or not character.isprintable() for character in key):
-        raise StreamImageError("API key must be non-empty and contain no whitespace or control characters")
+    return save_configuration(api_key=key)
+
+
+def validate_base_url(value: str) -> str:
+    value = value.strip().rstrip("/")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise StreamImageError("Base URL 格式不正确，请提供完整的 http:// 或 https:// 接口地址。") from exc
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment or any(c.isspace() or not c.isprintable() for c in value)):
+        raise StreamImageError("Base URL 格式不正确，请提供完整的 http:// 或 https:// 接口地址，不含凭据、查询参数或片段。")
+    return value
+
+
+def save_configuration(base_url: str | None = None, api_key: str | None = None) -> Path:
+    settings = {}
+    if base_url is not None:
+        settings["OPENAI_BASE_URL"] = validate_base_url(base_url)
+    if api_key is not None:
+        key = api_key.strip()
+        if not key or any(character.isspace() or not character.isprintable() for character in key):
+            raise StreamImageError("API Key 不能为空，也不能包含空白或控制字符，请重新填写。")
+        settings["OPENAI_API_KEY"] = key
+    if not settings:
+        raise StreamImageError("请提供需要保存的 Base URL 或 API Key。")
     destination = ENV_PATH
     directory = destination.parent
     temporary_path = None
@@ -125,7 +154,8 @@ def save_api_key(key: str) -> Path:
                 temporary.write(destination.read_text(encoding="utf-8"))
             temporary.flush()
             os.fsync(temporary.fileno())
-        set_key(temporary_path, "OPENAI_API_KEY", key)
+        for name, value in settings.items():
+            set_key(temporary_path, name, value)
         os.replace(temporary_path, destination)
     finally:
         if temporary_path is not None:
@@ -134,6 +164,9 @@ def save_api_key(key: str) -> Path:
 
 
 def load_base_url(home: Path) -> tuple[str, Path]:
+    local_url = dotenv_values(ENV_PATH, interpolate=False).get("OPENAI_BASE_URL")
+    if isinstance(local_url, str) and local_url.strip():
+        return validate_base_url(local_url), ENV_PATH
     config_path = home / "config.toml"
     try:
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -150,7 +183,7 @@ def load_base_url(home: Path) -> tuple[str, Path]:
         base_url = provider.get("base_url") if isinstance(provider, dict) else None
     if not isinstance(base_url, str) or not base_url.strip():
         raise StreamImageError("Codex config does not define base_url")
-    return base_url.strip().rstrip("/"), config_path
+    return validate_base_url(base_url), config_path
 
 
 def read_prompt(prompt: str | None, prompt_file: str | None) -> str:
@@ -326,8 +359,18 @@ def dry_run_result(
 
 def execute(args: argparse.Namespace) -> dict[str, Any]:
     home = codex_home()
-    api_key, auth_path = load_api_key(home, args.auth_file)
-    base_url, config_path = load_base_url(home)
+    failures = []
+    try:
+        api_key, auth_path = load_api_key(home, args.auth_file)
+    except StreamImageError as exc:
+        failures.append("API Key: " + str(exc))
+    try:
+        base_url, config_path = load_base_url(home)
+    except StreamImageError as exc:
+        failures.append("Base URL: " + str(exc))
+    if failures:
+        raise StreamImageError("配置暂时不可用：" + "；".join(failures)
+                               + "。请提供缺失或需要修正的配置，使用 configure 保存；API Key 建议通过终端隐藏输入。")
     prompt = read_prompt(args.prompt, args.prompt_file)
 
     if args.command == "edit":
@@ -426,6 +469,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("save-key", help="Persist an API key from hidden terminal input or stdin")
+    configure = subparsers.add_parser("configure", help="Save Base URL and/or API key in the skill .env")
+    configure.add_argument("--base-url", help="Save an HTTP(S) API base URL")
+    configure.add_argument("--api-key", action="store_true", help="Read the key from hidden input or stdin (not an argument value)")
 
     generate = subparsers.add_parser("generate")
     add_shared_arguments(generate)
@@ -450,11 +496,32 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def safe_error(exc: Exception) -> dict[str, Any]:
     status_code = getattr(exc, "status_code", None)
+    error_type = type(exc).__name__
+    messages = {
+        401: "接口认证失败（401），当前 API Key 未被接受，请检查或更新 Key。",
+        403: "接口拒绝访问（403），请检查账号、模型或接口权限；这不一定是 Key 无效。",
+        404: "接口不存在（404），请检查 Base URL 的路径和图片接口支持情况。",
+        429: "接口限制了请求（429），可能是限流或额度不足，请检查服务商的额度和限制。",
+    }
+    if isinstance(exc, StreamImageError):
+        message = str(exc)
+    elif error_type == "APITimeoutError":
+        message = "请求超时，请检查网络和服务状态。"
+    elif error_type == "APIConnectionError":
+        message = "无法连接图片接口，请检查 Base URL、网络、DNS 和 TLS；连接失败不一定是地址错误。"
+    elif status_code in messages:
+        message = messages[status_code]
+    elif isinstance(status_code, int) and status_code >= 500:
+        message = "图片服务发生服务端错误，请稍后再试或联系服务商。"
+    elif isinstance(exc, OSError):
+        message = "本地文件读写失败，请检查文件路径、权限和磁盘空间。"
+    else:
+        message = "图片请求失败，请检查请求参数和接口支持情况。"
     return {
         "ok": False,
         "error_type": type(exc).__name__,
         "status_code": status_code if isinstance(status_code, int) else None,
-        "error": str(exc) if isinstance(exc, StreamImageError) else "Image request failed",
+        "error": message,
     }
 
 
@@ -462,11 +529,19 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        if args.command == "save-key":
+        if args.command in {"save-key", "configure"}:
             from getpass import getpass
 
-            key = getpass("API key: ") if sys.stdin.isatty() else sys.stdin.read()
-            path = save_api_key(key)
+            base_url = getattr(args, "base_url", None)
+            read_key = args.command == "save-key" or args.api_key
+            if args.command == "configure" and base_url is None and not read_key:
+                if not sys.stdin.isatty():
+                    raise StreamImageError("请使用 --base-url 和/或 --api-key 指定需要配置的项目。")
+                base_url = input("Base URL（留空保留原配置）: ").strip() or None
+                key = getpass("API Key（留空保留原配置）: ").strip() or None
+            else:
+                key = (getpass("API Key: ") if sys.stdin.isatty() else sys.stdin.read()) if read_key else None
+            path = save_configuration(base_url=base_url, api_key=key)
             result = {"ok": True, "auth_file": str(path)}
         else:
             validate_args(args)
