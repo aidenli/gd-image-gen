@@ -1,3 +1,8 @@
+"""Self-checks for configuration handling, error feedback, and the local config form.
+
+Run with: uv run --with openai --with pillow --with python-dotenv --with httpx scripts/test_auth.py
+"""
+
 import json
 import os
 from pathlib import Path
@@ -5,132 +10,302 @@ import subprocess
 import sys
 import tempfile
 import shutil
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from unittest.mock import patch
 
 import stream_image
-from stream_image import load_api_key, load_base_url, save_api_key, StreamImageError
+from stream_image import (
+    configuration_state,
+    load_configuration,
+    save_configuration,
+    StreamImageError,
+)
 
 
-with tempfile.TemporaryDirectory() as temporary:
-    home = Path(temporary)
-    stream_image.ENV_PATH = home / ".env"
-    script_directory = home / "scripts"
-    script_directory.mkdir()
-    shutil.copyfile(Path(__file__).with_name("stream_image.py"), script_directory / "stream_image.py")
-    stream_image.ENV_PATH.write_text("# Keep this\nOTHER=value\n", encoding="utf-8")
-    (home / "auth.js").write_text("invalid", encoding="utf-8")
+def no_codex_fallback(home: Path) -> None:
+    """Codex credentials must never be picked up implicitly."""
     (home / "auth.json").write_text('{"OPENAI_API_KEY":"codex-test"}', encoding="utf-8")
-    assert load_api_key(home)[0] == "codex-test"
+    (home / "auth.js").write_text('{"OPENAI_API_KEY":"codex-js-test"}', encoding="utf-8")
     (home / "config.toml").write_text(
         'experimental_bearer_token = "config-test"\n'
         'model_provider = "ai"\n'
         '[model_providers.ai]\n'
-        'base_url = "https://config.example/v1/"\n',
+        'base_url = "https://config.example/v1/"\n'
+        'experimental_bearer_token = "provider-test"\n',
         encoding="utf-8",
     )
-    assert load_api_key(home)[0] == "config-test"
-    assert load_base_url(home)[0] == "https://config.example/v1"
-    assert (
-        stream_image.build_parser().parse_args(["generate", "--prompt", "test"]).model
-        == "gpt-image-2.5-flare"
-    )
-    assert load_api_key(home, str(home / "auth.json"))[0] == "codex-test"
-    for top_level in ('', 'experimental_bearer_token = "   "\n', 'experimental_bearer_token = 123\n'):
-        (home / "config.toml").write_text(
-            top_level + 'model_provider = "ai"\n'
-            '[model_providers.other]\nexperimental_bearer_token = "other-test"\n'
-            '[model_providers.ai]\nexperimental_bearer_token = " provider-test "\n',
-            encoding="utf-8",
-        )
-        assert load_api_key(home) == ("provider-test", home / "config.toml")
-    for config_text in ('experimental_bearer_token = " "\n', 'invalid toml',
-                        'model_provider = "ai"\n[model_providers.ai]\nexperimental_bearer_token = 123\n'):
-        (home / "config.toml").write_text(config_text, encoding="utf-8")
-        assert load_api_key(home)[0] == "codex-test"
-    (home / "config.toml").unlink()
-    original = (home / "auth.json").read_bytes()
-    command = [sys.executable, str(script_directory / "stream_image.py"), "save-key"]
-    result = subprocess.run(command, input="fallback-test\n", text=True, capture_output=True,
-                            env={**os.environ, "CODEX_HOME": str(home)})
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["ok"] is True
-    assert "fallback-test" not in result.stdout + result.stderr
-    assert load_api_key(home)[0] == "fallback-test"
-    assert stream_image.ENV_PATH.read_text(encoding="utf-8").startswith("# Keep this\nOTHER=value\n")
-    assert not (home / "gd-image-gen" / "auth.json").exists()
-    assert (home / "auth.json").read_bytes() == original
-    assert load_api_key(home, str(home / "auth.json"))[0] == "codex-test"
-    (home / "auth.js").write_text('{"OPENAI_API_KEY":"codex-js-test"}', encoding="utf-8")
-    assert load_api_key(home)[0] == "fallback-test"
-    (home / "auth.json").unlink()
-    assert load_api_key(home)[0] == "fallback-test"
-    (home / "auth.js").write_text("invalid", encoding="utf-8")
-    (home / "auth.json").write_text("{}", encoding="utf-8")
-    assert load_api_key(home)[0] == "fallback-test"
-    (home / "auth.json").unlink()
-    assert load_api_key(home)[0] == "fallback-test"
+    state = configuration_state()
+    assert state["ready"] is False
+    assert state["base_url"] is None and state["api_key_configured"] is False
     try:
-        load_api_key(home, str(home / "auth.js"))
-    except StreamImageError:
-        pass
+        load_configuration()
+    except StreamImageError as exc:
+        message = str(exc)
+        assert "Base URL 未配置" in message and "API Key 未配置" in message
+        assert "configure --web" in message
     else:
-        raise AssertionError("Explicit invalid credentials must not fall back")
-    for invalid in ("", "a b", "a\nb", "a\x00b"):
+        raise AssertionError("Codex credentials must not be used as a fallback")
+
+
+def hint_command_is_runnable() -> None:
+    """Regression: the hint used to emit a bare filename that `uv run` cannot spawn."""
+    hint = stream_image.configuration_hint()
+    script = Path(__file__).with_name("stream_image.py").resolve()
+    assert str(script) in hint, hint
+    assert "configure --web" in hint, hint
+    assert script.is_file()
+    # The quoted absolute path must actually be spawnable from an unrelated cwd.
+    result = subprocess.run(
+        [sys.executable, str(script), "status"],
+        text=True, capture_output=True, cwd=str(script.parent.parent),
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def masking_and_partial_updates() -> None:
+    stream_image.ENV_PATH.write_text("# Keep this\nOTHER=value\n", encoding="utf-8")
+    save_configuration(base_url="https://local.example/v1/", api_key="configured-secret-key")
+    assert load_configuration()[:2] == ("https://local.example/v1", "configured-secret-key")
+    state = configuration_state()
+    assert state["ready"] is True
+    assert state["api_key_masked"] == "con********-key"
+    assert "configured-secret-key" not in json.dumps(state)
+    assert stream_image.ENV_PATH.read_text(encoding="utf-8").startswith("# Keep this\nOTHER=value\n")
+    assert stream_image.ENV_PATH.read_text(encoding="utf-8").count("OPENAI_API_KEY") == 1
+
+    save_configuration(base_url="https://updated.example/v1")
+    assert load_configuration()[:2] == ("https://updated.example/v1", "configured-secret-key")
+    save_configuration(api_key="rotated-secret-key")
+    assert load_configuration()[:2] == ("https://updated.example/v1", "rotated-secret-key")
+
+
+def invalid_values_are_rejected() -> None:
+    save_configuration(base_url="https://stable.example/v1", api_key="stable-secret-key")
+    before = stream_image.ENV_PATH.read_bytes()
+    for url in ("", "example.com", "ftp://example.com", "https://user:secret@example.com",
+                "https://example.com?key=secret", "https://example.com#frag",
+                "https://example.com:bad"):
         try:
-            save_api_key(invalid)
+            save_configuration(base_url=url, api_key="changed")
         except StreamImageError:
             pass
         else:
-            raise AssertionError("Invalid key accepted")
+            raise AssertionError(f"Invalid URL accepted: {url!r}")
+        assert stream_image.ENV_PATH.read_bytes() == before
+    for invalid in ("", "a b", "a\nb", "a\x00b", "   "):
+        try:
+            save_configuration(api_key=invalid)
+        except StreamImageError:
+            pass
+        else:
+            raise AssertionError(f"Invalid key accepted: {invalid!r}")
+        assert stream_image.ENV_PATH.read_bytes() == before
+
+
+def corrupted_values_are_reported() -> None:
+    stream_image.ENV_PATH.write_text(
+        "OPENAI_BASE_URL=example.com\nOPENAI_API_KEY=\n", encoding="utf-8"
+    )
+    state = configuration_state()
+    assert state["ready"] is False
+    assert state["base_url_error"] and state["base_url"] is None
+    try:
+        load_configuration()
+    except StreamImageError as exc:
+        assert "Base URL" in str(exc) and "API Key" in str(exc)
+    else:
+        raise AssertionError("Corrupted configuration accepted")
+
+
+def atomic_write_survives_failure() -> None:
+    save_configuration(base_url="https://stable.example/v1", api_key="stable-secret-key")
     with patch("stream_image.os.replace", side_effect=OSError("simulated failure")):
         try:
-            save_api_key("replacement-test")
+            save_configuration(api_key="replacement-test")
         except OSError:
             pass
         else:
             raise AssertionError("Write failure ignored")
-    assert load_api_key(home)[0] == "fallback-test"
-    assert not list(home.glob("tmp*"))
+    assert load_configuration()[1] == "stable-secret-key"
+    assert not list(stream_image.ENV_PATH.parent.glob("tmp*"))
+
+
+def special_characters_round_trip() -> None:
     special_key = "test-'quoted'-${LITERAL}-#-\\end"
-    save_api_key(special_key)
-    assert load_api_key(home)[0] == special_key
-    stream_image.save_configuration(base_url="https://local.example/v1/", api_key="configured-test")
-    assert load_base_url(home) == ("https://local.example/v1", stream_image.ENV_PATH)
-    assert load_api_key(home)[0] == "configured-test"
-    stream_image.save_configuration(base_url="https://updated.example/v1")
-    assert load_api_key(home)[0] == "configured-test"
-    before = stream_image.ENV_PATH.read_bytes()
-    for url in ("", "example.com", "ftp://example.com", "https://user:secret@example.com", "https://example.com?key=secret", "https://example.com:bad"):
-        try:
-            stream_image.save_configuration(base_url=url, api_key="changed")
-        except StreamImageError:
-            pass
-        else:
-            raise AssertionError("Invalid URL accepted")
-        assert stream_image.ENV_PATH.read_bytes() == before
-    stream_image.ENV_PATH.unlink()
+    save_configuration(api_key=special_key)
+    assert load_configuration()[1] == special_key
+
+
+def dry_run_and_missing_config(home: Path) -> None:
     args = stream_image.build_parser().parse_args(["generate", "--prompt", "test", "--dry-run"])
     stream_image.validate_args(args)
+    result = stream_image.execute(args)
+    assert result["dry_run"] is True and result["request_url"].endswith("/images/generations")
+    assert "display_path" not in result
+    # Images belong to the skill itself, not to CODEX_HOME.
+    assert result["output_dir"] == str(stream_image.SKILL_ROOT / "generated_images")
+    assert "CODEX_HOME" not in result["output_dir"]
+    stream_image.ENV_PATH.unlink()
     try:
-        with patch("stream_image.codex_home", return_value=home):
-            stream_image.execute(args)
+        stream_image.execute(args)
     except StreamImageError as exc:
-        assert "API Key:" in str(exc) and "Base URL:" in str(exc)
+        assert "configure --web" in str(exc)
     else:
         raise AssertionError("Missing configuration accepted")
-    from openai import APIConnectionError, APITimeoutError, AuthenticationError, PermissionDeniedError, RateLimitError, InternalServerError
+
+
+def safe_errors_hide_secrets() -> None:
+    from openai import (
+        APIConnectionError, APITimeoutError, AuthenticationError,
+        PermissionDeniedError, RateLimitError, InternalServerError,
+    )
     import httpx
+
     request = httpx.Request("POST", "https://example.com/v1/images/generations")
-    for error, expected in ((APIConnectionError(request=request), "无法连接"), (APITimeoutError(request=request), "超时")):
+    for error, expected in (
+        (APIConnectionError(request=request), "无法连接"),
+        (APITimeoutError(request=request), "超时"),
+    ):
         assert expected in stream_image.safe_error(error)["error"]
-    for cls, status in ((AuthenticationError, 401), (PermissionDeniedError, 403), (RateLimitError, 429), (InternalServerError, 500)):
+    for cls, status in (
+        (AuthenticationError, 401), (PermissionDeniedError, 403),
+        (RateLimitError, 429), (InternalServerError, 500),
+    ):
         error = cls("secret-key-must-not-leak", response=httpx.Response(status, request=request), body=None)
         result = stream_image.safe_error(error)
         assert result["status_code"] == status
         assert "secret-key" not in json.dumps(result)
-    result = subprocess.run([sys.executable, str(script_directory / "stream_image.py"), "configure", "--base-url", "https://cli.example/v1", "--api-key"], input="cli-secret-test", text=True, capture_output=True)
+
+
+def cli_status_and_stdin_key(script: str, env: dict) -> None:
+    result = subprocess.run([sys.executable, script, "status"], text=True, capture_output=True, env=env)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["ready"] is False
+    result = subprocess.run(
+        [sys.executable, script, "status", "--require"], text=True, capture_output=True, env=env
+    )
+    assert result.returncode == 2
+
+    result = subprocess.run(
+        [sys.executable, script, "configure", "--base-url", "https://cli.example/v1", "--api-key"],
+        input="cli-secret-test", text=True, capture_output=True, env=env,
+    )
     assert result.returncode == 0, result.stderr
     assert "cli-secret-test" not in result.stdout + result.stderr
-    assert load_base_url(home)[0] == "https://cli.example/v1"
-    assert load_api_key(home)[0] == "cli-secret-test"
-print("Configuration and error feedback checks passed")
+    assert json.loads(result.stdout)["env_file"] == str(stream_image.ENV_PATH)
+    assert load_configuration()[:2] == ("https://cli.example/v1", "cli-secret-test")
+
+    result = subprocess.run([sys.executable, script, "status"], text=True, capture_output=True, env=env)
+    status = json.loads(result.stdout)
+    assert status["ready"] is True
+    assert "cli-secret-test" not in result.stdout
+    assert status["api_key_masked"] == "cli********test"
+
+
+def _submit(page_url: str, fields: dict) -> tuple[int, str]:
+    body = urllib.parse.urlencode(fields).encode("utf-8")
+    request = urllib.request.Request(page_url + "save", data=body, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+
+
+def configuration_form_flow() -> None:
+    """The key must reach the local process over HTTP, never the command line."""
+    stream_image.ENV_PATH.unlink(missing_ok=True)
+    captured: dict = {}
+    ready = threading.Event()
+
+    def run_form() -> None:
+        captured["result"] = stream_image.serve_configuration_form(
+            timeout_seconds=30, open_browser=False,
+            on_ready=lambda url: captured.__setitem__("url", url) or ready.set(),
+        )
+
+    form_thread = threading.Thread(target=run_form, daemon=True)
+    form_thread.start()
+    assert ready.wait(timeout=15), "form server did not start"
+    page_url = captured["url"]
+    assert page_url.startswith("http://127.0.0.1:")
+
+    with urllib.request.urlopen(page_url, timeout=10) as response:
+        page = response.read().decode("utf-8")
+    assert response.status == 200
+    assert "GD Image Gen 配置" in page
+    token = page.split('name="token" value="')[1].split('"')[0]
+
+    status, _ = _submit(page_url, {"token": "wrong", "base_url": "https://evil.example/v1", "api_key": "x"})
+    assert status == 403
+    assert not stream_image.ENV_PATH.exists()
+
+    # Regression: a non-ASCII token used to raise TypeError inside compare_digest,
+    # dropping the connection instead of returning 403.
+    status, body = _submit(page_url, {"token": "中文令牌", "base_url": "https://evil.example/v1", "api_key": "x"})
+    assert status == 403, (status, body)
+    assert "令牌无效" in body
+    assert not stream_image.ENV_PATH.exists()
+
+    status, body = _submit(page_url, {"token": token, "base_url": "example.com", "api_key": "form-secret"})
+    assert status == 400 and "格式不正确" in body
+    assert not stream_image.ENV_PATH.exists()
+
+    status, body = _submit(
+        page_url, {"token": token, "base_url": "https://form.example/v1/", "api_key": "form-secret-key"}
+    )
+    assert status == 200 and "已保存" in body
+    assert "form-secret-key" not in body
+    form_thread.join(timeout=10)
+    assert captured["result"]["ok"] is True
+    assert captured["result"]["env_file"] == str(stream_image.ENV_PATH)
+    assert load_configuration()[:2] == ("https://form.example/v1", "form-secret-key")
+
+
+def abandoned_form_fails_loudly() -> None:
+    stream_image.ENV_PATH.unlink(missing_ok=True)
+    try:
+        stream_image.serve_configuration_form(timeout_seconds=0.5, open_browser=False)
+    except StreamImageError as exc:
+        assert "未保存" in str(exc) or "超时" in str(exc)
+    else:
+        raise AssertionError("Abandoned form must not report success")
+    assert not stream_image.ENV_PATH.exists()
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory() as temporary:
+        home = Path(temporary)
+        stream_image.ENV_PATH = home / ".env"
+        script_directory = home / "scripts"
+        script_directory.mkdir()
+        shutil.copyfile(Path(__file__).with_name("stream_image.py"), script_directory / "stream_image.py")
+        script = str(script_directory / "stream_image.py")
+        env = {**os.environ, "CODEX_HOME": str(home)}
+
+        checks = [
+            ("no_codex_fallback", lambda: no_codex_fallback(home)),
+            ("hint_command_is_runnable", hint_command_is_runnable),
+            ("masking_and_partial_updates", masking_and_partial_updates),
+            ("invalid_values_are_rejected", invalid_values_are_rejected),
+            ("corrupted_values_are_reported", corrupted_values_are_reported),
+            ("atomic_write_survives_failure", atomic_write_survives_failure),
+            ("special_characters_round_trip", special_characters_round_trip),
+            ("dry_run_and_missing_config", lambda: dry_run_and_missing_config(home)),
+            ("safe_errors_hide_secrets", safe_errors_hide_secrets),
+            ("cli_status_and_stdin_key", lambda: cli_status_and_stdin_key(script, env)),
+            ("configuration_form_flow", configuration_form_flow),
+            ("abandoned_form_fails_loudly", abandoned_form_fails_loudly),
+        ]
+        for name, check in checks:
+            check()
+            print(f"  ok  {name}")
+    print("Configuration and error feedback checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

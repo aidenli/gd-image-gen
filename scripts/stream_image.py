@@ -15,16 +15,21 @@ import binascii
 from contextlib import ExitStack
 from datetime import datetime, timezone
 import hashlib
+import html
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sys
 import tempfile
-import tomllib
-from typing import Any
-from urllib.parse import urlsplit
+import threading
+import time
+from typing import Any, Callable
+from urllib.parse import parse_qs, urlsplit
+import webbrowser
 
 from dotenv import dotenv_values, set_key
 
@@ -36,7 +41,9 @@ DEFAULT_OUTPUT_FORMAT = "png"
 MIN_TIMEOUT_SECONDS = 120.0
 MAX_TIMEOUT_SECONDS = 600.0
 DEFAULT_TIMEOUT_SECONDS = MAX_TIMEOUT_SECONDS
-ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+SKILL_ROOT = Path(__file__).resolve().parent.parent
+ENV_PATH = SKILL_ROOT / ".env"
+OUTPUT_DIR = SKILL_ROOT / "generated_images"
 API_SIZE_PATTERN = re.compile(r"(?:auto|[1-9][0-9]*x[1-9][0-9]*)\Z")
 FORMAT_EXTENSIONS = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}
 
@@ -45,85 +52,20 @@ class StreamImageError(RuntimeError):
     pass
 
 
-def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
-
-
-def _parse_auth_text(raw: str, source: Path) -> dict[str, Any]:
-    text = raw.lstrip("\ufeff").strip()
+def read_env() -> dict[str, Any]:
+    if not ENV_PATH.exists():
+        return {}
     try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(
-            r"\bOPENAI_API_KEY\b\s*[:=]\s*(['\"])(?P<value>[^'\"]+)\1",
-            text,
-        )
-        if not match:
-            raise StreamImageError(
-                f"Could not parse OPENAI_API_KEY from Codex auth file: {source}"
-            )
-        return {"OPENAI_API_KEY": match.group("value")}
-    if not isinstance(value, dict):
-        raise StreamImageError(f"Codex auth file must contain an object: {source}")
-    return value
-
-
-def load_api_key(home: Path, explicit_auth: str | None = None) -> tuple[str, Path]:
-    if explicit_auth:
-        candidates = [Path(explicit_auth).expanduser().resolve()]
-    else:
-        local_key = dotenv_values(ENV_PATH, interpolate=False).get("OPENAI_API_KEY")
-        if isinstance(local_key, str) and local_key.strip():
-            return local_key.strip(), ENV_PATH
-        config_path = home / "config.toml"
-        try:
-            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, UnicodeError, tomllib.TOMLDecodeError):
-            config = {}
-        token = config.get("experimental_bearer_token")
-        if not isinstance(token, str) or not token.strip():
-            provider_name = config.get("model_provider")
-            providers = config.get("model_providers")
-            provider = providers.get(provider_name) if isinstance(providers, dict) else None
-            token = provider.get("experimental_bearer_token") if isinstance(provider, dict) else None
-        if isinstance(token, str) and token.strip():
-            return token.strip(), config_path
-        candidates = [home / "auth.json", home / "auth.js", ENV_PATH]
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            auth = (
-                dotenv_values(path, interpolate=False)
-                if path.name == ".env"
-                else _parse_auth_text(path.read_text(encoding="utf-8"), path)
-            )
-        except StreamImageError:
-            if explicit_auth:
-                raise
-            continue
-        except (OSError, UnicodeError) as exc:
-            if not explicit_auth:
-                continue
-            raise StreamImageError(f"Could not read Codex auth file: {path}") from exc
-        key = auth.get("OPENAI_API_KEY")
-        if isinstance(key, str) and key.strip():
-            return key.strip(), path
-        if explicit_auth:
-            raise StreamImageError(f"OPENAI_API_KEY is missing from Codex auth file: {path}")
-    names = ", ".join(str(path) for path in candidates)
-    raise StreamImageError(f"No readable API key; checked: {names}. Run save-key to persist a key.")
-
-
-def save_api_key(key: str) -> Path:
-    return save_configuration(api_key=key)
+        return dotenv_values(ENV_PATH, interpolate=False)
+    except (OSError, UnicodeError) as exc:
+        raise StreamImageError(f"无法读取配置文件：{ENV_PATH}") from exc
 
 
 def validate_base_url(value: str) -> str:
     value = value.strip().rstrip("/")
     try:
         parsed = urlsplit(value)
-        port = parsed.port
+        parsed.port  # noqa: B018 - raises ValueError on a malformed port
     except ValueError as exc:
         raise StreamImageError("Base URL 格式不正确，请提供完整的 http:// 或 https:// 接口地址。") from exc
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
@@ -133,15 +75,79 @@ def validate_base_url(value: str) -> str:
     return value
 
 
+def validate_api_key(value: str) -> str:
+    key = value.strip()
+    if not key or any(character.isspace() or not character.isprintable() for character in key):
+        raise StreamImageError("API Key 不能为空，也不能包含空白或控制字符，请重新填写。")
+    return key
+
+
+def mask_api_key(value: str) -> str:
+    key = value.strip()
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "*" * len(key)
+    return f"{key[:3]}{'*' * 8}{key[-4:]}"
+
+
+def configuration_state() -> dict[str, Any]:
+    values = read_env()
+    raw_url = values.get("OPENAI_BASE_URL")
+    raw_key = values.get("OPENAI_API_KEY")
+    state: dict[str, Any] = {
+        "ok": True,
+        "env_file": str(ENV_PATH),
+        "env_exists": ENV_PATH.is_file(),
+        "base_url": None,
+        "base_url_error": None,
+        "api_key_configured": False,
+        "api_key_masked": None,
+        "api_key_error": None,
+    }
+    if isinstance(raw_url, str) and raw_url.strip():
+        try:
+            state["base_url"] = validate_base_url(raw_url)
+        except StreamImageError as exc:
+            state["base_url_error"] = str(exc)
+    if isinstance(raw_key, str) and raw_key.strip():
+        try:
+            state["api_key_masked"] = mask_api_key(validate_api_key(raw_key))
+            state["api_key_configured"] = True
+        except StreamImageError as exc:
+            state["api_key_error"] = str(exc)
+    state["ready"] = bool(
+        state["base_url"] and state["api_key_configured"] and not state["api_key_error"]
+    )
+    return state
+
+
+def configuration_hint() -> str:
+    return (
+        "请让用户在浏览器中自行填写（Key 不经过对话）："
+        f'运行 `uv run "{Path(__file__).resolve()}" configure --web`，'
+        f"脚本会打开本地表单，保存到 {ENV_PATH}。"
+    )
+
+
+def load_configuration() -> tuple[str, str, Path]:
+    state = configuration_state()
+    problems = []
+    if state["base_url"] is None:
+        problems.append(state["base_url_error"] or "Base URL 未配置")
+    if not state["api_key_configured"]:
+        problems.append(state["api_key_error"] or "API Key 未配置")
+    if problems:
+        raise StreamImageError("配置不可用：" + "；".join(problems) + "。" + configuration_hint())
+    return state["base_url"], read_env()["OPENAI_API_KEY"].strip(), ENV_PATH
+
+
 def save_configuration(base_url: str | None = None, api_key: str | None = None) -> Path:
     settings = {}
     if base_url is not None:
         settings["OPENAI_BASE_URL"] = validate_base_url(base_url)
     if api_key is not None:
-        key = api_key.strip()
-        if not key or any(character.isspace() or not character.isprintable() for character in key):
-            raise StreamImageError("API Key 不能为空，也不能包含空白或控制字符，请重新填写。")
-        settings["OPENAI_API_KEY"] = key
+        settings["OPENAI_API_KEY"] = validate_api_key(api_key)
     if not settings:
         raise StreamImageError("请提供需要保存的 Base URL 或 API Key。")
     destination = ENV_PATH
@@ -163,32 +169,199 @@ def save_configuration(base_url: str | None = None, api_key: str | None = None) 
     return destination
 
 
-def load_base_url(home: Path) -> tuple[str, Path]:
-    local_url = dotenv_values(ENV_PATH, interpolate=False).get("OPENAI_BASE_URL")
-    if isinstance(local_url, str) and local_url.strip():
-        return validate_base_url(local_url), ENV_PATH
-    config_path = home / "config.toml"
-    try:
-        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise StreamImageError(f"Codex config file not found: {config_path}") from exc
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
-        raise StreamImageError(f"Could not parse Codex config file: {config_path}") from exc
+PAGE_TEMPLATE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+ body {{ font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f5f6f8;
+        color: #1b1f24; margin: 0; padding: 40px 16px; }}
+ main {{ max-width: 520px; margin: 0 auto; background: #fff; border-radius: 12px;
+         padding: 28px; box-shadow: 0 2px 16px rgba(16,24,40,.08); }}
+ h1 {{ font-size: 19px; margin: 0 0 8px; }}
+ p {{ color: #5b6472; font-size: 13px; line-height: 1.7; margin: 0 0 16px; }}
+ label {{ display: block; font-size: 13px; font-weight: 600; margin: 0 0 6px; }}
+ .hint {{ font-size: 12px; color: #7a8494; font-weight: 400; margin-left: 6px; }}
+ input {{ width: 100%; box-sizing: border-box; padding: 10px 12px; font-size: 14px;
+          border: 1px solid #cfd6e0; border-radius: 8px; margin-bottom: 16px; font-family: inherit; }}
+ input:focus {{ outline: 2px solid #2f6feb; outline-offset: 1px; border-color: #2f6feb; }}
+ button {{ width: 100%; padding: 11px; font-size: 14px; font-weight: 600; color: #fff;
+           background: #2f6feb; border: 0; border-radius: 8px; cursor: pointer; }}
+ button:hover {{ background: #2559c4; }}
+ .state {{ font-size: 12px; background: #f0f3f8; border-radius: 8px; padding: 10px 12px;
+           margin-bottom: 20px; line-height: 1.7; color: #3c4654; }}
+ .ok {{ font-size: 30px; text-align: center; margin-bottom: 8px; }}
+ .fail {{ color: #b42318; }}
+ code {{ background: #eceff4; padding: 1px 5px; border-radius: 4px; font-size: 11px; }}
+ a {{ color: #2f6feb; font-size: 13px; }}
+</style>
+</head>
+<body><main>{body}</main></body>
+</html>
+"""
 
-    base_url = config.get("base_url")
-    if not isinstance(base_url, str) or not base_url.strip():
-        provider_name = config.get("model_provider")
-        providers = config.get("model_providers")
-        provider = providers.get(provider_name) if isinstance(providers, dict) else None
-        base_url = provider.get("base_url") if isinstance(provider, dict) else None
-    if not isinstance(base_url, str) or not base_url.strip():
-        raise StreamImageError("Codex config does not define base_url")
-    return validate_base_url(base_url), config_path
+CONFIGURE_FORM_BODY = """
+  <h1>GD Image Gen 配置</h1>
+  <p>在此页面填写的 Base URL 与 API Key 只会提交到本机运行的脚本进程，直接写入本地 .env 文件，不经过 AI 对话。</p>
+  <div class="state">
+    当前状态：Base URL {url_state}；API Key {key_state}<br>
+    保存位置：<code>{env_path}</code>
+  </div>
+  <form method="post" action="/save">
+    <input type="hidden" name="token" value="{token}">
+    <label for="base_url">Base URL<span class="hint">留空则保留原值</span></label>
+    <input id="base_url" name="base_url" type="url" placeholder="https://example.com/v1"
+           autocomplete="off" spellcheck="false" value="{base_url_value}">
+    <label for="api_key">API Key<span class="hint">留空则保留原值</span></label>
+    <input id="api_key" name="api_key" type="password" autocomplete="off" spellcheck="false"
+           placeholder="{key_placeholder}">
+    <button type="submit">保存到本地</button>
+  </form>
+  <p>保存后可直接关闭此页面，脚本会自动退出。Base URL 需为 http(s) 地址，不含凭据、查询参数或片段。</p>
+"""
+
+
+def render_page(title: str, body: str) -> str:
+    return PAGE_TEMPLATE.format(title=html.escape(title), body=body)
+
+
+def _parse_form(body: str) -> dict[str, str]:
+    parsed = parse_qs(body, keep_blank_values=True, strict_parsing=False)
+    return {name: values[0] if values else "" for name, values in parsed.items()}
+
+
+def _error_page(message: str) -> str:
+    return render_page(
+        "保存失败",
+        f'<h1 class="fail">保存失败</h1><p>{message}</p><p><a href="/">返回并重新填写</a></p>',
+    )
+
+
+def serve_configuration_form(
+    timeout_seconds: float = 300.0,
+    open_browser: bool = True,
+    on_ready: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    state = configuration_state()
+    token = secrets.token_urlsafe(24)
+    outcome: dict[str, Any] = {}
+    finished = threading.Event()
+    rendered_state = {
+        "url_state": state["base_url"] or ("未配置" if not state["base_url_error"] else "格式有误"),
+        "key_state": (
+            f"已配置（{state['api_key_masked']}）"
+            if state["api_key_configured"]
+            else ("格式有误" if state["api_key_error"] else "未配置")
+        ),
+        "env_path": html.escape(str(ENV_PATH)),
+        "token": html.escape(token, quote=True),
+        "base_url_value": html.escape(state["base_url"] or "", quote=True),
+        "key_placeholder": "留空保留已保存的 Key" if state["api_key_configured"] else "sk-...",
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "gd-image-gen"
+        sys_version = ""
+
+        def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003 - silence access logs
+            return
+
+        def _send(self, status: int, page: str) -> None:
+            payload = page.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+            if urlsplit(self.path).path not in {"/", "/index.html"}:
+                self._send(404, _error_page("页面不存在。"))
+                return
+            self._send(200, render_page("GD Image Gen 配置", CONFIGURE_FORM_BODY.format(**rendered_state)))
+
+        def do_POST(self) -> None:  # noqa: N802 - stdlib naming
+            if urlsplit(self.path).path != "/save":
+                self._send(404, _error_page("页面不存在。"))
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 64 * 1024:
+                self._send(400, _error_page("表单内容无效。"))
+                return
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            fields = _parse_form(raw)
+            # compare_digest rejects non-ASCII str, and a hostile form can send any bytes.
+            if not secrets.compare_digest(
+                fields.get("token", "").encode("utf-8"), token.encode("utf-8")
+            ):
+                self._send(403, _error_page("表单令牌无效，请重新打开页面。"))
+                return
+            base_url = fields.get("base_url", "").strip() or None
+            api_key = fields.get("api_key", "").strip() or None
+            if base_url is None and api_key is None:
+                self._send(400, _error_page("Base URL 和 API Key 均为空，没有需要保存的内容。"))
+                return
+            try:
+                path = save_configuration(base_url=base_url, api_key=api_key)
+            except StreamImageError as exc:
+                self._send(400, _error_page(html.escape(str(exc))))
+                return
+            except OSError:
+                self._send(500, _error_page("写入配置文件失败，请检查目录权限和磁盘空间。"))
+                return
+            outcome["saved"] = True
+            outcome["env_file"] = str(path)
+            saved = [name for name, value in (("Base URL", base_url), ("API Key", api_key)) if value]
+            detail = "已保存：" + "、".join(saved) + "。"
+            self._send(
+                200,
+                render_page(
+                    "已保存",
+                    f'<div class="ok">✓</div><h1>已保存</h1>'
+                    f"<p>{detail}<br>已写入 <code>{html.escape(str(path))}</code>。"
+                    f"可以关闭此页面，回到对话继续。</p>",
+                ),
+            )
+            finished.set()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    host, port = server.server_address[0], server.server_address[1]
+    url = f"http://{host}:{port}/"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    opened = False
+    if open_browser:
+        try:
+            opened = webbrowser.open(url)
+        except Exception:
+            opened = False
+    if not opened:
+        print(f"配置页面（请在浏览器打开）: {url}", file=sys.stderr)
+    if on_ready is not None:
+        on_ready(url)
+    try:
+        finished.wait(timeout=timeout_seconds)
+    finally:
+        server.shutdown()
+        server.server_close()
+    if not outcome.get("saved"):
+        raise StreamImageError(
+            "配置表单未提交或已超时，未保存任何内容。请在浏览器打开下面的地址后重新填写："
+            + url
+        )
+    return {"ok": True, "env_file": outcome["env_file"], "opened_browser": opened}
 
 
 def read_prompt(prompt: str | None, prompt_file: str | None) -> str:
-    if prompt and prompt_file:
-        raise StreamImageError("Use --prompt or --prompt-file, not both")
     if prompt_file:
         path = Path(prompt_file).expanduser().resolve()
         try:
@@ -320,7 +493,7 @@ def request_payload(args: argparse.Namespace, prompt: str) -> dict[str, Any]:
         "model": args.model,
         "prompt": prompt,
         "n": 1,
-        "size": args.api_size,
+        "size": args.size,
         "quality": args.quality,
         "output_format": args.output_format,
     }
@@ -335,9 +508,6 @@ def request_payload(args: argparse.Namespace, prompt: str) -> dict[str, Any]:
 
 def dry_run_result(
     args: argparse.Namespace,
-    home: Path,
-    auth_path: Path,
-    config_path: Path | None,
     base_url: str,
     prompt: str,
 ) -> dict[str, Any]:
@@ -346,31 +516,18 @@ def dry_run_result(
         "ok": True,
         "dry_run": True,
         "operation": args.command,
-        "auth_file": str(auth_path),
-        "config_file": str(config_path) if config_path else None,
+        "env_file": str(ENV_PATH),
         "request_url": base_url + endpoint,
         "model": args.model,
         "prompt_length": len(prompt),
-        "api_size": args.api_size,
-        "output_dir": str((home / "generated_images").resolve()),
+        "api_size": args.size,
+        "output_dir": str(OUTPUT_DIR),
         "images": [str(path) for path in getattr(args, "image_paths", [])],
     }
 
 
 def execute(args: argparse.Namespace) -> dict[str, Any]:
-    home = codex_home()
-    failures = []
-    try:
-        api_key, auth_path = load_api_key(home, args.auth_file)
-    except StreamImageError as exc:
-        failures.append("API Key: " + str(exc))
-    try:
-        base_url, config_path = load_base_url(home)
-    except StreamImageError as exc:
-        failures.append("Base URL: " + str(exc))
-    if failures:
-        raise StreamImageError("配置暂时不可用：" + "；".join(failures)
-                               + "。请提供缺失或需要修正的配置，使用 configure 保存；API Key 建议通过终端隐藏输入。")
+    base_url, api_key, _ = load_configuration()
     prompt = read_prompt(args.prompt, args.prompt_file)
 
     if args.command == "edit":
@@ -381,7 +538,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         args.mask_path = None
 
     if args.dry_run:
-        return dry_run_result(args, home, auth_path, config_path, base_url, prompt)
+        return dry_run_result(args, base_url, prompt)
 
     try:
         from openai import OpenAI
@@ -400,29 +557,24 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             response = client.images.generate(**payload)
             if not response.data or not response.data[0].b64_json:
                 raise StreamImageError("Non-streaming generation returned no image data")
-            completed_b64 = response.data[0].b64_json
-            request_metrics = {"request_mode": "non_streaming"}
         else:
             with ExitStack() as stack:
                 image_files = [stack.enter_context(path.open("rb")) for path in args.image_paths]
                 request = dict(payload)
                 request["image"] = image_files if len(image_files) > 1 else image_files[0]
-                mask_file = None
                 if args.mask_path is not None:
-                    mask_file = stack.enter_context(args.mask_path.open("rb"))
-                    request["mask"] = mask_file
+                    request["mask"] = stack.enter_context(args.mask_path.open("rb"))
                 response = client.images.edit(**request)
                 if not response.data or not response.data[0].b64_json:
                     raise StreamImageError("Non-streaming edit returned no image data")
-                completed_b64 = response.data[0].b64_json
-                request_metrics = {"request_mode": "non_streaming"}
+        completed_b64 = response.data[0].b64_json
     finally:
         client.close()
 
     data, image_format, width, height = decode_and_validate_image(
         completed_b64, args.output_format
     )
-    output_dir = home / "generated_images"
+    output_dir = OUTPUT_DIR
     prefix = args.filename_prefix or ("generated" if args.command == "generate" else "edited")
     path, digest = save_image(data, image_format, output_dir, prefix)
     return {
@@ -434,10 +586,10 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "format": image_format,
         "width": width,
         "height": height,
-        "api_size": args.api_size,
+        "api_size": args.size,
         "size": path.stat().st_size,
         "sha256": digest,
-        **request_metrics,
+        "request_mode": "non_streaming",
     }
 
 
@@ -459,19 +611,27 @@ def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--filename-prefix")
     parser.add_argument("--size", type=parse_api_size, default=DEFAULT_SIZE)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("--auth-file", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate or edit an image through the Codex-configured Images API"
+        description="Generate or edit an image through a user-configured OpenAI-compatible Images API"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    status = subparsers.add_parser(
+        "status", help="Report whether Base URL and API key are configured (key is masked)"
+    )
+    status.add_argument("--require", action="store_true", help="Exit non-zero when configuration is incomplete")
     subparsers.add_parser("save-key", help="Persist an API key from hidden terminal input or stdin")
-    configure = subparsers.add_parser("configure", help="Save Base URL and/or API key in the skill .env")
+    configure = subparsers.add_parser(
+        "configure", help="Save Base URL and/or API key in the skill .env"
+    )
+    configure.add_argument("--web", action="store_true", help="Open a local browser form (recommended; key never enters the chat). Only run this for an actual image request that lacks configuration")
     configure.add_argument("--base-url", help="Save an HTTP(S) API base URL")
     configure.add_argument("--api-key", action="store_true", help="Read the key from hidden input or stdin (not an argument value)")
+    configure.add_argument("--no-browser", action="store_true", help="With --web, print the URL instead of opening a browser")
+    configure.add_argument("--timeout", type=float, default=300.0, help="With --web, seconds to wait for the form")
 
     generate = subparsers.add_parser("generate")
     add_shared_arguments(generate)
@@ -491,7 +651,6 @@ def validate_args(args: argparse.Namespace) -> None:
         )
     if args.output_compression is not None and not 0 <= args.output_compression <= 100:
         raise StreamImageError("--output-compression must be between 0 and 100")
-    args.api_size = args.size
 
 
 def safe_error(exc: Exception) -> dict[str, Any]:
@@ -525,31 +684,52 @@ def safe_error(exc: Exception) -> dict[str, Any]:
     }
 
 
+def emit(payload: dict[str, Any], stream: Any = None) -> None:
+    """Write one JSON object, keeping non-ASCII readable but never crashing on a narrow console."""
+    target = stream if stream is not None else sys.stdout
+    try:
+        print(json.dumps(payload, ensure_ascii=False), file=target)
+    except UnicodeEncodeError:
+        print(json.dumps(payload, ensure_ascii=True), file=target)
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
+        if args.command == "status":
+            result = configuration_state()
+            emit(result)
+            return 0 if result["ready"] or not args.require else 2
         if args.command in {"save-key", "configure"}:
-            from getpass import getpass
-
-            base_url = getattr(args, "base_url", None)
-            read_key = args.command == "save-key" or args.api_key
-            if args.command == "configure" and base_url is None and not read_key:
-                if not sys.stdin.isatty():
-                    raise StreamImageError("请使用 --base-url 和/或 --api-key 指定需要配置的项目。")
-                base_url = input("Base URL（留空保留原配置）: ").strip() or None
-                key = getpass("API Key（留空保留原配置）: ").strip() or None
+            if args.command == "configure" and args.web:
+                result = serve_configuration_form(
+                    timeout_seconds=args.timeout, open_browser=not args.no_browser
+                )
             else:
-                key = (getpass("API Key: ") if sys.stdin.isatty() else sys.stdin.read()) if read_key else None
-            path = save_configuration(base_url=base_url, api_key=key)
-            result = {"ok": True, "auth_file": str(path)}
+                from getpass import getpass
+
+                base_url = getattr(args, "base_url", None)
+                read_key = args.command == "save-key" or args.api_key
+                if args.command == "configure" and base_url is None and not read_key:
+                    if not sys.stdin.isatty():
+                        raise StreamImageError(
+                            "请使用 configure --web 在浏览器中填写（推荐），"
+                            "或用 --base-url 和/或 --api-key 指定需要配置的项目。"
+                        )
+                    base_url = input("Base URL（留空保留原配置）: ").strip() or None
+                    key = getpass("API Key（留空保留原配置）: ").strip() or None
+                else:
+                    key = (getpass("API Key: ") if sys.stdin.isatty() else sys.stdin.read()) if read_key else None
+                path = save_configuration(base_url=base_url, api_key=key)
+                result = {"ok": True, "env_file": str(path)}
         else:
             validate_args(args)
             result = execute(args)
     except Exception as exc:
-        print(json.dumps(safe_error(exc), ensure_ascii=True), file=sys.stderr)
+        emit(safe_error(exc), sys.stderr)
         return 1
-    print(json.dumps(result, ensure_ascii=False))
+    emit(result)
     return 0
 
 
