@@ -412,6 +412,19 @@ def decode_and_validate_image(encoded: str, requested_format: str) -> tuple[byte
     return data, detected_format, width, height
 
 
+def image_has_transparency(data: bytes) -> bool:
+    """True when the image carries an alpha channel with at least one non-opaque pixel."""
+    from PIL import Image
+
+    with Image.open(BytesIO(data)) as image:
+        if image.mode == "P" and "transparency" in image.info:
+            image = image.convert("RGBA")
+        if "A" not in image.getbands():
+            return False
+        low, _ = image.getchannel("A").getextrema()
+        return low < 255
+
+
 def sanitize_prefix(value: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
     return normalized or "generated"
@@ -574,10 +587,11 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     data, image_format, width, height = decode_and_validate_image(
         completed_b64, args.output_format
     )
+    has_transparency = image_has_transparency(data)
     output_dir = OUTPUT_DIR
     prefix = args.filename_prefix or ("generated" if args.command == "generate" else "edited")
     path, digest = save_image(data, image_format, output_dir, prefix)
-    return {
+    result = {
         "ok": True,
         "operation": args.command,
         "path": str(path),
@@ -590,7 +604,12 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "size": path.stat().st_size,
         "sha256": digest,
         "request_mode": "non_streaming",
+        "background": args.background,
+        "has_transparency": has_transparency,
     }
+    if args.background == "transparent" and not has_transparency:
+        result["warning"] = "请求了透明背景，但返回的图片没有透明像素；服务商或模型可能不支持该参数。"
+    return result
 
 
 def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
@@ -648,6 +667,10 @@ def validate_args(args: argparse.Namespace) -> None:
     if not MIN_TIMEOUT_SECONDS < args.timeout <= MAX_TIMEOUT_SECONDS:
         raise StreamImageError(
             "--timeout must be greater than 120 and no greater than 600 seconds"
+        )
+    if args.background == "transparent" and args.output_format == "jpeg":
+        raise StreamImageError(
+            "JPEG 不支持透明背景；--background transparent 需搭配 --output-format png 或 webp"
         )
     if args.output_compression is not None and not 0 <= args.output_compression <= 100:
         raise StreamImageError("--output-compression must be between 0 and 100")

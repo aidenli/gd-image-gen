@@ -180,6 +180,64 @@ def safe_errors_hide_secrets() -> None:
         assert "secret-key" not in json.dumps(result)
 
 
+def _png_b64(mode: str, color) -> str:
+    import base64
+    from io import BytesIO
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new(mode, (4, 4), color).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def transparent_jpeg_is_rejected() -> None:
+    parser = stream_image.build_parser()
+    args = parser.parse_args(
+        ["generate", "--prompt", "x", "--background", "transparent", "--output-format", "jpeg"]
+    )
+    try:
+        stream_image.validate_args(args)
+    except StreamImageError as exc:
+        assert "png" in str(exc) and "webp" in str(exc)
+    else:
+        raise AssertionError("Transparent JPEG must be rejected before any request")
+    for output_format in ("png", "webp"):
+        stream_image.validate_args(parser.parse_args(
+            ["generate", "--prompt", "x", "--background", "transparent", "--output-format", output_format]
+        ))
+
+
+def transparency_detection() -> None:
+    import base64
+
+    decode = lambda encoded: base64.b64decode(encoded)
+    assert stream_image.image_has_transparency(decode(_png_b64("RGBA", (255, 0, 0, 0)))) is True
+    assert stream_image.image_has_transparency(decode(_png_b64("RGBA", (255, 0, 0, 255)))) is False
+    assert stream_image.image_has_transparency(decode(_png_b64("RGB", (255, 0, 0)))) is False
+
+
+def transparent_result_reports_alpha(output_dir: Path) -> None:
+    from types import SimpleNamespace
+
+    save_configuration(base_url="https://example.com/v1", api_key="sk-test-transparent")
+    parser = stream_image.build_parser()
+    for encoded, expect_alpha in ((_png_b64("RGBA", (0, 0, 0, 0)), True), (_png_b64("RGB", (255, 255, 255)), False)):
+        client = SimpleNamespace(
+            images=SimpleNamespace(generate=lambda **_: SimpleNamespace(data=[SimpleNamespace(b64_json=encoded)])),
+            close=lambda: None,
+        )
+        args = parser.parse_args(["generate", "--prompt", "sticker", "--background", "transparent"])
+        stream_image.validate_args(args)
+        with patch("openai.OpenAI", return_value=client), patch.object(stream_image, "OUTPUT_DIR", output_dir):
+            result = stream_image.execute(args)
+        assert result["background"] == "transparent"
+        assert result["has_transparency"] is expect_alpha
+        assert ("warning" in result) is (not expect_alpha)
+        assert Path(result["path"]).parent == output_dir.resolve()
+    # Later checks expect an unconfigured skill.
+    stream_image.ENV_PATH.unlink()
+
+
 def cli_status_and_stdin_key(script: str, env: dict) -> None:
     result = subprocess.run([sys.executable, script, "status"], text=True, capture_output=True, env=env)
     assert result.returncode == 0, result.stderr
@@ -297,6 +355,9 @@ def main() -> int:
             ("special_characters_round_trip", special_characters_round_trip),
             ("dry_run_and_missing_config", lambda: dry_run_and_missing_config(home)),
             ("safe_errors_hide_secrets", safe_errors_hide_secrets),
+            ("transparent_jpeg_is_rejected", transparent_jpeg_is_rejected),
+            ("transparency_detection", transparency_detection),
+            ("transparent_result_reports_alpha", lambda: transparent_result_reports_alpha(home / "images")),
             ("cli_status_and_stdin_key", lambda: cli_status_and_stdin_key(script, env)),
             ("configuration_form_flow", configuration_form_flow),
             ("abandoned_form_fails_loudly", abandoned_form_fails_loudly),

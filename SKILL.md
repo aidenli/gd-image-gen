@@ -66,6 +66,14 @@ uv run "<SKILL_DIR>/scripts/stream_image.py" edit \
 - 提示词有多个尺寸时，区分所需产物与示例、源素材、输入图、最小/最大约束；分不清就用 `auto`。
 - 只给比例、没给尺寸，或尺寸互相冲突时，传 `auto` 并保持提示词不变。
 
+## 透明背景
+
+- 用户要透明背景、抠图、去背景、PNG 图标、贴纸、Logo 免底色等可叠加使用的素材时，加 `--background transparent`。
+- 透明背景只能搭配 `--output-format png`（默认）或 `webp`；搭配 `jpeg` 时脚本会在发请求前直接报错。
+- 提示词里补一句主体边缘清晰、无背景、无投影，不要描述背景场景。
+- 结果中的 `has_transparency` 表示图片是否真的含透明像素。请求了透明却为 `false` 时，结果会带 `warning`：如实告诉用户服务商或模型可能不支持该参数，不要声称已是透明图，也不要自行抠图或换服务商重试。
+- 用户明确要白底或实色背景时用 `--background opaque`；其它情况不传，由服务端决定。
+
 ## 运行时限
 
 - `--timeout` 须大于 120 且不超过 600 秒，默认用 600，除非用户在此范围内另有要求。
@@ -75,7 +83,7 @@ uv run "<SKILL_DIR>/scripts/stream_image.py" edit \
 
 ## 输出与失败规则
 
-- 成功：stdout 输出一个 JSON 对象，含 `ok: true`、`path`、`display_path`、`runtime_os`、格式、尺寸、字节数、SHA-256、`request_mode`。
+- 成功：stdout 输出一个 JSON 对象，含 `ok: true`、`path`、`display_path`、`runtime_os`、格式、尺寸、字节数、SHA-256、`request_mode`、`background`、`has_transparency`，以及透明请求未生效时的 `warning`。
 - 失败：stderr 输出 `ok: false` 的 JSON，`error` 字段是可直接转述给用户的安全说明。主动解释原因（URL 格式、连接、超时、401/403/404/429、服务端错误），不要从连接失败或 403 推断 Key 无效，也不要盲目重试。
 - 响应中没有完整图片数据即视为失败。生成到编辑的链路中生成失败要立即失败，不用旧图顶替，不换请求模式重试，也不切换到内置图片工具或其它服务商。
 - 生成后不要裁剪或缩放图片，不要覆盖无关的既有文件。

@@ -94,6 +94,23 @@ uv run ~/.agents/skills/gd-image-gen/scripts/stream_image.py edit \
 
 只有在提供了 mask 时才用 `--mask /absolute/path/to/mask.png`。多张源图就重复 `--image`。
 
+## 透明背景
+
+需要透明底的素材（图标、贴纸、Logo、抠图）时加 `--background transparent`，输出格式用 `png`（默认）或 `webp`：
+
+```sh
+uv run ~/.agents/skills/gd-image-gen/scripts/stream_image.py generate \
+  --prompt "一只卡通橘猫贴纸，主体边缘清晰，无背景，无投影" \
+  --background transparent \
+  --output-format png \
+  --size auto \
+  --timeout 600
+```
+
+- `--background transparent` 搭配 `--output-format jpeg` 会在发请求前报错，因为 JPEG 没有透明通道。
+- 结果里的 `has_transparency` 表示保存的图片是否真的含透明像素。请求了透明但返回不透明图时，结果会带 `warning`，通常说明服务商或模型不支持该参数。
+- 是否生效取决于你接入的服务商和模型。
+
 ## 运行规则
 
 - 超时需大于 120 秒且不超过 600 秒。
@@ -103,7 +120,7 @@ uv run ~/.agents/skills/gd-image-gen/scripts/stream_image.py edit \
 
 ## 结果约定
 
-成功时，stdout 输出一个 JSON 对象，包含 `ok: true`、输出元数据、SHA-256、请求模式和 `display_path`。在 agent 回复中渲染本地图片时使用 `display_path`（规则见 [references/display.md](references/display.md)）。
+成功时，stdout 输出一个 JSON 对象，包含 `ok: true`、输出元数据、SHA-256、请求模式、`display_path`、`background` 和 `has_transparency`。在 agent 回复中渲染本地图片时使用 `display_path`（规则见 [references/display.md](references/display.md)）。
 
 失败时，stderr 输出一个 `ok: false` 的 JSON 对象。响应中没有完整图片数据即视为失败。
 
