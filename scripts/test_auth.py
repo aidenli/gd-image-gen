@@ -278,7 +278,8 @@ def abandoned_form_fails_loudly() -> None:
 
 def main() -> int:
     with tempfile.TemporaryDirectory() as temporary:
-        home = Path(temporary)
+        # Resolve symlinks (macOS /var -> /private/var) to match the script's own resolved paths.
+        home = Path(temporary).resolve()
         stream_image.ENV_PATH = home / ".env"
         script_directory = home / "scripts"
         script_directory.mkdir()

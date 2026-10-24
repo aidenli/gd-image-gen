@@ -6,23 +6,38 @@
 
 ## 安装
 
-把本仓库安装为 Codex 技能：
+本技能遵循 [Agent Skills](https://agentskills.io) 目录约定（`SKILL.md` + `scripts/` + `references/`），可直接放进任何支持该约定的 agent 的技能目录。脚本按自身位置定位 `.env` 与 `generated_images`，装在哪里都能用。
+
+| Agent | 用户级安装目录 | 项目级安装目录 |
+|---|---|---|
+| Claude Code | `~/.claude/skills/gd-image-gen` | `.claude/skills/gd-image-gen` |
+| Codex | `${CODEX_HOME:-~/.codex}/skills/gd-image-gen` 或 `~/.agents/skills/gd-image-gen` | `.agents/skills/gd-image-gen` |
+| DeepSeek Harness | `~/.agents/skills/gd-image-gen` 或 `${DSH_HOME:-~/.dsh}/skills/gd-image-gen` | `.agents/skills/gd-image-gen` 或 `.dsh/skills/gd-image-gen` |
+| WorkBuddy | `~/.workbuddy/skills/gd-image-gen` 或 `~/.agents/skills/gd-image-gen` | `.workbuddy/skills/gd-image-gen` |
+
+`~/.agents/skills` 被 Codex、DeepSeek Harness 和 WorkBuddy 共同识别，多个 agent 共用时装在这里最省事：
 
 ```sh
-git clone https://github.com/aidenli/gd-image-gen.git "${CODEX_HOME:-$HOME/.codex}/skills/gd-image-gen"
+git clone https://github.com/aidenli/gd-image-gen.git ~/.agents/skills/gd-image-gen
 ```
 
-更新已有安装：
+Claude Code 不读取 `~/.agents/skills`，单独安装，或用软链接共享同一份（共享后 `.env` 与生成的图片也共用）：
 
 ```sh
-git -C "${CODEX_HOME:-$HOME/.codex}/skills/gd-image-gen" pull --ff-only
+ln -s ~/.agents/skills/gd-image-gen ~/.claude/skills/gd-image-gen
 ```
 
-Codex 通过 `SKILL.md` 发现本技能，界面元数据在 `agents/openai.yaml`。
+更新：
+
+```sh
+git -C ~/.agents/skills/gd-image-gen pull --ff-only
+```
+
+装好后重启 agent 或开新会话，让它重新扫描技能目录。`agents/openai.yaml` 是 Codex 专用的界面元数据，其它 agent 会忽略它。
 
 ## 依赖与配置
 
-先安装 [`uv`](https://docs.astral.sh/uv/)，然后用本地浏览器表单配置技能：
+先安装 [`uv`](https://docs.astral.sh/uv/)，然后在技能目录下用本地浏览器表单配置：
 
 ```sh
 uv run scripts/stream_image.py configure --web
@@ -48,7 +63,7 @@ uv run scripts/stream_image.py configure --api-key   # 隐藏的终端输入或 
 
 留空会保留原值；自动化场景通过 stdin 传入 Key，绝不作为命令行参数值。`save-key` 仍然兼容。设置以原子方式写入技能根目录、已被 git 忽略的 `.env` 中的 `OPENAI_BASE_URL` 与 `OPENAI_API_KEY`，保留其它设置和注释。Key 以本地明文存储。手动配置可参考 `.env.example`。
 
-配置只由用户提供。不会回退到 `$CODEX_HOME/config.toml`、`auth.json` 或 `auth.js`，因此缺失的设置总会被报告出来，而不会悄悄借用别的凭据。进程环境变量也不是这两项设置的来源。
+配置只由用户提供。不会回退到任何 agent 的配置或登录文件（如 Codex 的 `config.toml`、`auth.json`），因此缺失的设置总会被报告出来，而不会悄悄借用别的凭据。进程环境变量也不是这两项设置的来源。
 
 设置缺失或无效时，会在发出任何 API 请求之前一并报告，并给出打开配置表单的确切命令。URL 必须使用 HTTP(S)，且不含内嵌凭据、查询参数或片段。错误信息会区分连接失败、超时、认证、权限、接口不存在、限流/额度与服务端失败，同时不暴露服务商原始消息或 Key。保存配置只校验格式，不代表连通性或 Key 有效性已被验证。
 
@@ -59,8 +74,7 @@ uv run scripts/stream_image.py configure --api-key   # 隐藏的终端输入或 
 每个所需图片运行一条命令。`uv run` 会在需要时安装脚本的 Python 依赖。
 
 ```sh
-CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-uv run "$CODEX_HOME/skills/gd-image-gen/scripts/stream_image.py" generate \
+uv run ~/.agents/skills/gd-image-gen/scripts/stream_image.py generate \
   --prompt "木桌上的一盏红色纸灯笼，棚拍产品图" \
   --size auto \
   --quality medium \
@@ -70,8 +84,7 @@ uv run "$CODEX_HOME/skills/gd-image-gen/scripts/stream_image.py" generate \
 编辑图片时显式传入每一张输入图：
 
 ```sh
-CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
-uv run "$CODEX_HOME/skills/gd-image-gen/scripts/stream_image.py" edit \
+uv run ~/.agents/skills/gd-image-gen/scripts/stream_image.py edit \
   --prompt "把背景换成清晨安静的城市街道；保持主体不变" \
   --image /absolute/path/to/input.png \
   --size auto \
@@ -90,8 +103,26 @@ uv run "$CODEX_HOME/skills/gd-image-gen/scripts/stream_image.py" edit \
 
 ## 结果约定
 
-成功时，stdout 输出一个 JSON 对象，包含 `ok: true`、输出元数据、SHA-256、请求模式和 `display_path`。在 Codex 回复中渲染本地图片时使用 `display_path`。
+成功时，stdout 输出一个 JSON 对象，包含 `ok: true`、输出元数据、SHA-256、请求模式和 `display_path`。在 agent 回复中渲染本地图片时使用 `display_path`（规则见 [references/display.md](references/display.md)）。
 
 失败时，stderr 输出一个 `ok: false` 的 JSON 对象。响应中没有完整图片数据即视为失败。
+
+## 兼容性说明
+
+- 各 agent 的 shell 工具默认超时不同（Claude Code 默认 2 分钟）。`SKILL.md` 要求 agent 把超时调到至少 610 秒或转后台等待，否则长请求会被宿主提前杀掉。
+- 宿主若内置图片工具，技能说明要求优先使用本技能，失败也不切换。
+- 下面示例路径以 `~/.agents/skills` 为例，按你的实际安装位置替换。
+
+## 文件结构
+
+```
+SKILL.md                    agent 入口：工作流、命令、运行时限
+references/configuration.md 配置与凭据规则（按需加载）
+references/display.md       结果展示规则（按需加载）
+scripts/stream_image.py     生成、编辑、配置脚本（uv 单文件脚本）
+scripts/test_auth.py        配置与错误处理自检
+agents/openai.yaml          Codex 界面元数据
+.env.example                手动配置模板
+```
 
 完整的 agent 工作流与约束见 [SKILL.md](SKILL.md)。
