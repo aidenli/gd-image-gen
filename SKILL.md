@@ -109,11 +109,21 @@ uv run "<SKILL_DIR>/scripts/stream_image.py" edit \
 
 配置是惰性的，只在真实图片请求因配置失败时处理。凭据只来自技能目录的 `.env`，不会借用任何 agent 的登录配置。绝不让用户把 Key 粘贴到对话里。完整规则、表单用法和安全约束见 [references/configuration.md](references/configuration.md)。
 
+## 安装技能
+
+只在用户要求安装时执行，不要顺带运行 `configure` 或发图片请求。目标目录按「定位脚本」的表格选，已存在时先告诉用户，不要覆盖。
+
+1. 先从 GitHub 克隆：`git clone https://github.com/aidenli/gd-image-gen.git "<目标目录>"`
+2. 因连接失败、超时或 GitHub 无法访问而失败时，删掉克隆失败留下的不完整目录（只删本次刚创建的目录），改从 Gitee 镜像克隆，内容与 GitHub 相同：`git clone https://gitee.com/hurricant/gd-image-gen.git "<目标目录>"`
+3. 两个都失败就如实报告，不要换其它来源。
+
+装好后告诉用户开新会话才会加载技能；uv 的安装见「uv 与国内镜像」。
+
 ## 更新技能
 
 只在用户要求更新时执行，不要顺带运行 `configure` 或发图片请求。先看 `<SKILL_DIR>` 的安装方式：
 
-- 含 `.git`：运行 `git -C "<SKILL_DIR>" pull --ff-only`；失败时如实报告，不要强制覆盖本地改动。
+- 含 `.git`：运行 `git -C "<SKILL_DIR>" pull --ff-only`；失败时如实报告，不要强制覆盖本地改动。若因 GitHub 无法访问而失败，改从 Gitee 拉取一次：`git -C "<SKILL_DIR>" pull --ff-only https://gitee.com/hurricant/gd-image-gen.git main`，不要改动原有的 remote。
 - 是软链接或目录联接：更新它指向的克隆。
 - 是从仓库复制的（无 `.git`）：在源仓库根目录运行 `git pull --ff-only`，再运行 `git archive HEAD | tar -x -C "<SKILL_DIR>"`。
 

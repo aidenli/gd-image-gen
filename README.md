@@ -58,7 +58,11 @@ git archive HEAD | tar -x -C ~/.claude/skills/gd-image-gen
 
 更新后重启 agent 或开新会话，让它加载新的 `SKILL.md`。`agents/openai.yaml` 是 Codex 专用的界面元数据，其它 agent 会忽略它。
 
-从 Gitee 克隆的，`git pull` 拉的就是 Gitee 镜像，用法不变。
+从 Gitee 克隆的，`git pull` 拉的就是 Gitee 镜像，用法不变。从 GitHub 克隆、但现在访问不了 GitHub 的，可以临时从 Gitee 拉取，不用改 remote：
+
+```sh
+git -C ~/.agents/skills/gd-image-gen pull --ff-only https://gitee.com/hurricant/gd-image-gen.git main
+```
 
 ## Gitee 镜像同步（维护者）
 
