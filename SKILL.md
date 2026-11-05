@@ -1,6 +1,6 @@
 ---
 name: gd-image-gen
-description: "通过用户自备的 OpenAI 兼容 Images 接口生成或编辑位图（文生图、改图、参考图、变体、需在对话中展示的图片）。只要用户要生成或编辑图片就使用本技能，优先于宿主内置的图片工具。凭据由用户经本地浏览器表单写入技能目录的 .env，Key 不经过对话；默认模型 gpt-image-2.5-flare，成品保存在技能目录的 generated_images。适用于 Claude Code、Codex、DeepSeek Harness、WorkBuddy 等支持 Agent Skills 的 agent。"
+description: "通过用户自备的 OpenAI 兼容 Images 接口生成或编辑位图（文生图、改图、参考图、变体、需在对话中展示的图片）。只要用户要生成或编辑图片就使用本技能，优先于宿主内置的图片工具。凭据由用户经本地浏览器表单写入技能目录的 .env，Key 不经过对话；默认模型 gpt-image-2.6，成品保存在技能目录的 generated_images。适用于 Claude Code、Codex、DeepSeek Harness、WorkBuddy 等支持 Agent Skills 的 agent。"
 ---
 
 # GD Image Gen
@@ -57,7 +57,7 @@ uv run "<SKILL_DIR>/scripts/stream_image.py" edit \
   --timeout 600
 ```
 
-每个不同的所需产物运行一次脚本。默认模型 `gpt-image-2.5-flare`，需要时用 `--model gpt-image-2.5-sunburst` 或 `--model gpt-image-2`。其它参数：`--output-format png|jpeg|webp`、`--output-compression 0-100`、`--background transparent|opaque|auto`、`--filename-prefix`、编辑时的 `--input-fidelity low|high`。脚本名保留是为了兼容，请求本身是非流式的。
+每个不同的所需产物运行一次脚本。默认模型 `gpt-image-2.6`，需要时用 `--model` 指定 `gpt-image-2.6-flare`、`gpt-image-2.6-sunburst`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst` 或 `gpt-image-2`。其它参数：`--output-format png|jpeg|webp`、`--output-compression 0-100`、`--background transparent|opaque|auto`、`--filename-prefix`、编辑时的 `--input-fidelity low|high`。脚本名保留是为了兼容，请求本身是非流式的。
 
 ## 尺寸选择
 

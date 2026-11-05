@@ -34,7 +34,7 @@ import webbrowser
 from dotenv import dotenv_values, set_key
 
 
-DEFAULT_MODEL = "gpt-image-2.5-flare"
+DEFAULT_MODEL = "gpt-image-2.6"
 DEFAULT_SIZE = "auto"
 DEFAULT_QUALITY = "medium"
 DEFAULT_OUTPUT_FORMAT = "png"

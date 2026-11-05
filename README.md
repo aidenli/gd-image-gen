@@ -67,7 +67,7 @@ uv run scripts/stream_image.py configure --api-key   # 隐藏的终端输入或 
 
 设置缺失或无效时，会在发出任何 API 请求之前一并报告，并给出打开配置表单的确切命令。URL 必须使用 HTTP(S)，且不含内嵌凭据、查询参数或片段。错误信息会区分连接失败、超时、认证、权限、接口不存在、限流/额度与服务端失败，同时不暴露服务商原始消息或 Key。保存配置只校验格式，不代表连通性或 Key 有效性已被验证。
 
-默认模型为 `gpt-image-2.5-flare`；需要时用 `--model` 指定 `gpt-image-2.5-sunburst` 或 `gpt-image-2`。
+默认模型为 `gpt-image-2.6`；需要时用 `--model` 指定 `gpt-image-2.6-flare`、`gpt-image-2.6-sunburst`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst` 或 `gpt-image-2`。
 
 ## 使用
 
