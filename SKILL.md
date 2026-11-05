@@ -22,6 +22,22 @@ description: "通过用户自备的 OpenAI 兼容 Images 接口生成或编辑�
 
 运行脚本需要 [`uv`](https://docs.astral.sh/uv/)，它会自动安装 Python 依赖。下文命令为 POSIX shell 写法；Windows PowerShell 下把续行符 `\` 换成反引号，路径照常加引号。
 
+### uv 与国内镜像
+
+国内网络常连不上 GitHub 和 PyPI。镜像只临时用于当次命令，不写入 uv、pip 的全局配置或 `.env`。
+
+- **未安装 uv**：告诉用户要安装 uv，先用 [官方安装方式](https://docs.astral.sh/uv/getting-started/installation/)；下载失败或超时，改用 `python -m pip install -i https://mirrors.aliyun.com/pypi/simple/ uv`（Windows 也可用 `py -m pip`）。装完确认 `uv --version` 可用。
+- **依赖或 Python 下载失败**：`uv run` 在脚本启动前因连接失败、超时或下载出错退出（stderr 不是本脚本的 `ok: false` JSON）时，带上下面两个环境变量把同一条命令重跑一次：
+
+  ```sh
+  UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/ \
+  UV_PYTHON_INSTALL_MIRROR=https://registry.npmmirror.com/-/binary/python-build-standalone/ \
+  uv run "<SKILL_DIR>/scripts/stream_image.py" ...
+  ```
+
+  PowerShell 写法：先 `$env:UV_DEFAULT_INDEX="..."; $env:UV_PYTHON_INSTALL_MIRROR="..."` 再运行，结束后 `Remove-Item Env:UV_DEFAULT_INDEX, Env:UV_PYTHON_INSTALL_MIRROR`。依赖装好后会被 uv 缓存，之后的命令不用再带镜像。
+- 镜像也失败就如实报告，不要改换其它来源反复重试。脚本自己的 `ok: false` 错误（配置、接口、超时）与镜像无关，不要用镜像重跑。
+
 ## 工作流程
 
 1. 判断是 `generate` 还是 `edit`。
@@ -92,3 +108,13 @@ uv run "<SKILL_DIR>/scripts/stream_image.py" edit \
 ## 配置与凭据
 
 配置是惰性的，只在真实图片请求因配置失败时处理。凭据只来自技能目录的 `.env`，不会借用任何 agent 的登录配置。绝不让用户把 Key 粘贴到对话里。完整规则、表单用法和安全约束见 [references/configuration.md](references/configuration.md)。
+
+## 更新技能
+
+只在用户要求更新时执行，不要顺带运行 `configure` 或发图片请求。先看 `<SKILL_DIR>` 的安装方式：
+
+- 含 `.git`：运行 `git -C "<SKILL_DIR>" pull --ff-only`；失败时如实报告，不要强制覆盖本地改动。
+- 是软链接或目录联接：更新它指向的克隆。
+- 是从仓库复制的（无 `.git`）：在源仓库根目录运行 `git pull --ff-only`，再运行 `git archive HEAD | tar -x -C "<SKILL_DIR>"`。
+
+`.env` 和 `generated_images/` 不受影响，不要删除它们。更新后告诉用户开新会话才会加载新的说明。完整说明见 README 的「更新」一节。

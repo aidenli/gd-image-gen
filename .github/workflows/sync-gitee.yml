@@ -1,0 +1,33 @@
+# 每次推送到 GitHub 后，把同一个分支或标签推到 Gitee 镜像。
+# 需要在 GitHub 仓库 Settings → Secrets and variables → Actions 中设置：
+#   变量 GITEE_REPO      例如 aidenli/gd-image-gen（未设置时本任务跳过）
+#   密钥 GITEE_USERNAME  Gitee 用户名
+#   密钥 GITEE_TOKEN     Gitee 私人令牌（需 projects 权限）
+# Gitee 仓库只作只读镜像：这里强制推送，直接提交到 Gitee 的改动会被覆盖。
+name: Sync to Gitee
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: vars.GITEE_REPO != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Push to Gitee
+        env:
+          GITEE_REPO: ${{ vars.GITEE_REPO }}
+          GITEE_USERNAME: ${{ secrets.GITEE_USERNAME }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          # shortcut: 只同步本次推送的引用，GitHub 上删除的分支或标签不会在 Gitee 删除，需要时手动删。
+          git push --force "https://${GITEE_USERNAME}:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git" "${GITHUB_REF}:${GITHUB_REF}"

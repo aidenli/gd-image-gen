@@ -21,23 +21,77 @@
 git clone https://github.com/aidenli/gd-image-gen.git ~/.agents/skills/gd-image-gen
 ```
 
+访问不了 GitHub 时，改用 Gitee 镜像，内容与 GitHub 相同：
+
+```sh
+git clone https://gitee.com/hurricant/gd-image-gen.git ~/.agents/skills/gd-image-gen
+```
+
 Claude Code 不读取 `~/.agents/skills`，单独安装，或用软链接共享同一份（共享后 `.env` 与生成的图片也共用）：
 
 ```sh
 ln -s ~/.agents/skills/gd-image-gen ~/.claude/skills/gd-image-gen
 ```
 
-更新：
+装好后重启 agent 或开新会话，让它重新扫描技能目录。
+
+## 更新
+
+按安装方式选一种。`.env` 和 `generated_images/` 都被 git 忽略，以下方式都不会覆盖它们。
+
+用 `git clone` 安装的，直接拉取：
 
 ```sh
 git -C ~/.agents/skills/gd-image-gen pull --ff-only
 ```
 
-装好后重启 agent 或开新会话，让它重新扫描技能目录。`agents/openai.yaml` 是 Codex 专用的界面元数据，其它 agent 会忽略它。
+用软链接（Windows 上为目录联接）指向某个克隆的，更新那个克隆即可，链接本身不用动。
+
+从本仓库复制安装的（目录里没有 `.git`），在仓库根目录把已提交的文件重新导出到安装目录：
+
+```sh
+git pull --ff-only
+git archive HEAD | tar -x -C ~/.claude/skills/gd-image-gen
+```
+
+导出只覆盖仓库里的文件，不删除安装目录里多出的文件。某次更新删除或重命名了文件时，手动删掉安装目录里对应的旧文件。
+
+更新后重启 agent 或开新会话，让它加载新的 `SKILL.md`。`agents/openai.yaml` 是 Codex 专用的界面元数据，其它 agent 会忽略它。
+
+从 Gitee 克隆的，`git pull` 拉的就是 Gitee 镜像，用法不变。
+
+## Gitee 镜像同步（维护者）
+
+[.github/workflows/sync-gitee.yml](.github/workflows/sync-gitee.yml) 会在每次推送到 GitHub 后，把同一个分支或标签强制推送到 Gitee。启用步骤：
+
+1. 在 Gitee 新建空仓库（例如 `hurricant/gd-image-gen`），设为公开。Gitee 的公开仓库可能需要审核。
+2. 在 Gitee「设置 → 私人令牌」生成令牌，勾选 `projects` 权限。
+3. 在 GitHub 仓库「Settings → Secrets and variables → Actions」中：
+   - 新建变量 `GITEE_REPO`，值为 `hurricant/gd-image-gen`；
+   - 新建密钥 `GITEE_USERNAME`（Gitee 用户名）和 `GITEE_TOKEN`（上一步的令牌）。
+4. 在 Actions 页面手动运行一次 `Sync to Gitee`，确认 Gitee 上已有代码。
+
+未设置 `GITEE_REPO` 时该任务直接跳过，不会报错。Gitee 仓库只作只读镜像，不要直接在 Gitee 上提交。GitHub 上删除的分支或标签不会自动在 Gitee 删除。
 
 ## 依赖与配置
 
-先安装 [`uv`](https://docs.astral.sh/uv/)，然后在技能目录下用本地浏览器表单配置：
+先安装 [`uv`](https://docs.astral.sh/uv/)。官方安装脚本要从 GitHub 下载，国内下载失败时用 pip 从国内镜像安装：
+
+```sh
+python -m pip install -i https://mirrors.aliyun.com/pypi/simple/ uv
+```
+
+`uv run` 第一次运行时会从 PyPI 下载依赖，没有 Python 3.11+ 时还会从 GitHub 下载 Python。国内网络失败时，在当次命令前临时加上镜像（不写入全局配置）：
+
+```sh
+UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple/ \
+UV_PYTHON_INSTALL_MIRROR=https://registry.npmmirror.com/-/binary/python-build-standalone/ \
+uv run scripts/stream_image.py status
+```
+
+依赖下载过一次后会被 uv 缓存，之后的命令不用再带镜像。使用本技能的 agent 会在 `uv run` 因网络失败时自动带上这两个变量重跑一次。
+
+然后在技能目录下用本地浏览器表单配置：
 
 ```sh
 uv run scripts/stream_image.py configure --web
@@ -139,6 +193,7 @@ references/display.md       结果展示规则（按需加载）
 scripts/stream_image.py     生成、编辑、配置脚本（uv 单文件脚本）
 scripts/test_auth.py        配置与错误处理自检
 agents/openai.yaml          Codex 界面元数据
+.github/workflows/sync-gitee.yml  推送后同步到 Gitee 镜像
 .env.example                手动配置模板
 ```
 
